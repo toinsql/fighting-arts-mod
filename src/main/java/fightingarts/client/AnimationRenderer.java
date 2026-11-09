@@ -31,6 +31,7 @@ public final class AnimationRenderer {
     private static final Map<AbstractClientPlayer, Long> LANDINGS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Boolean> LANDING_WALK = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Pose> LANDING_ARMS = new WeakHashMap<>();
+    private static final Map<AbstractClientPlayer, Double> GROUND_Y = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, HandGesture> HAND_GESTURES = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, FirstPersonBlend> HAND_BLEND = new WeakHashMap<>();
     private static final Map<UUID, ArmAttacks> ATTACKS = new HashMap<>();
@@ -183,6 +184,7 @@ public final class AnimationRenderer {
             LANDINGS.remove(player);
             LANDING_WALK.remove(player);
             LANDING_ARMS.remove(player);
+            GROUND_Y.remove(player);
             return null;
         }
         long now = player.level().getGameTime();
@@ -225,11 +227,12 @@ public final class AnimationRenderer {
             once = airClip.once;
         }
         Long landing = LANDINGS.get(player);
-        double landingAge = landing == null ? -1 : (renderTick - landing - 2) / 20;
+        double landingAge = landing == null ? -1 : Math.max(0, (renderTick - landing - 2) / 20);
         Clip landingClip = CLIPS.get("fa_fall_ground");
         boolean landingPlaying = !action && air == null && landingAge >= 0 && landingClip != null && landingAge < landingClip.length;
         if (landingPlaying) {
             if (moving) LANDING_WALK.put(player, true);
+            else LANDING_WALK.remove(player);
             clip = LANDING_WALK.containsKey(player) ? "fa_fall_ground_walk_transition" : "fa_fall_ground";
             t = landingAge;
             once = true;
@@ -241,10 +244,13 @@ public final class AnimationRenderer {
         if (!entry) {
             String gait = player.isCrouching() ? "fa_walk_crouch"
                     : walkingBackwards(player) ? "fa_walk_back" : player.isSprinting() ? "fa_run" : "fa_walk";
+            if (landingPlaying && landingAge >= 1.25) gait = player.isSprinting() ? "fa_run" : "fa_walk";
             LegCycle legs = LEG_CYCLES.computeIfAbsent(player, ignored -> new LegCycle());
             legs.update(renderTick, airborne, moving ? gait : null, speed, flying);
             Clip legClip = legs.gait == null ? null : CLIPS.get(legs.gait + "_legs");
-            if (legClip != null && !landingPlaying) {
+            boolean walkingLandingLegs = landingPlaying && moving
+                    && "fa_fall_ground_walk_transition".equals(clip) && landingAge >= 1.25;
+            if (legClip != null && (!landingPlaying || walkingLandingLegs)) {
                 double legTime = wrapCycle(legs.phase) * legClip.length;
                 if (clip.equals(legs.gait)) t = legTime;
                 else legPose = legClip.sample(legTime);
@@ -264,7 +270,7 @@ public final class AnimationRenderer {
         Playback previous = LAST.get(playerId);
         Pose transitionFrom = null;
         double transitionStart = renderTick;
-        if (!entering && previous != null
+        if (!entering && !(landingPlaying && (previous == null || !previous.clip.startsWith("fa_fall_ground"))) && previous != null
                 && renderTick >= previous.renderTick && renderTick - previous.renderTick < TRANSITION_TICKS) {
             if (!clip.equals(previous.clip)) {
                 transitionFrom = previous.pose;
@@ -349,13 +355,15 @@ public final class AnimationRenderer {
     private static AirMotion updateAirMotion(AbstractClientPlayer player, long now) {
         if (player.onGround() || player.getAbilities().flying) {
             AirMotion previous = AIR_MOTION.remove(player);
-            if (previous != null && previous.fallStart >= 0 && !player.getAbilities().flying) {
+            if (previous != null && previous.fallStart >= 0 && !player.getAbilities().flying
+                    && previous.highestY - player.getY() >= 2.0 - 1e-3) {
                 LANDINGS.put(player, now);
                 LANDING_WALK.remove(player);
                 Playback previousPose = LAST.get(player.getUUID());
                 if (previousPose != null) LANDING_ARMS.put(player, previousPose.pose);
                 else LANDING_ARMS.remove(player);
             }
+            GROUND_Y.put(player, player.getY());
             return null;
         }
         Long landed = LANDINGS.remove(player);
@@ -366,7 +374,9 @@ public final class AnimationRenderer {
             if (legs != null) legs.phase = Math.floor(wrapCycle(legs.phase) * 2 + .001) / 2 + .5;
         }
         double velocity = player.getDeltaMovement().y;
-        AirMotion air = AIR_MOTION.computeIfAbsent(player, ignored -> new AirMotion(now, velocity, player.getGravity()));
+        AirMotion air = AIR_MOTION.computeIfAbsent(player, ignored -> new AirMotion(now, velocity, player.getGravity(),
+                Math.max(player.getY(), GROUND_Y.getOrDefault(player, player.getY()))));
+        air.highestY = Math.max(air.highestY, player.getY());
         if (velocity <= 0 && air.fallStart < 0) air.fallStart = now;
         return air;
     }
@@ -374,14 +384,16 @@ public final class AnimationRenderer {
     public static void tickMotion(AbstractClientPlayer player) {
         StyleState state = STATES.get(player.getUUID());
         if (state != null && state.phase().equals("ACTIVE")) updateAirMotion(player, player.level().getGameTime());
-        else { AIR_MOTION.remove(player); LANDINGS.remove(player); LANDING_WALK.remove(player); LANDING_ARMS.remove(player); }
+        else { AIR_MOTION.remove(player); LANDINGS.remove(player); LANDING_WALK.remove(player); LANDING_ARMS.remove(player); GROUND_Y.remove(player); }
     }
 
     public static double landingCameraOffset(AbstractClientPlayer player, float partialTick) {
         Long landed = LANDINGS.get(player);
         if (landed == null || !player.onGround()) return 0;
         double seconds = (player.level().getGameTime() + partialTick - landed - 2) / 20;
-        return seconds < 0 || seconds > .55 ? 0 : -.09 * Math.sin(Math.PI * seconds / .55);
+        Clip clip = CLIPS.get("fa_fall_ground");
+        double duration = clip == null ? 1.5 : clip.length;
+        return seconds < 0 || seconds >= duration ? 0 : -.09 * Math.sin(Math.PI * seconds / duration);
     }
 
     private record TimedClip(String name, double time, boolean once) {}
@@ -463,10 +475,12 @@ public final class AnimationRenderer {
     private static final class AirMotion {
         private final long start;
         private final int ascentTicks;
+        private double highestY;
         private long fallStart = -1;
 
-        private AirMotion(long start, double velocity, double gravity) {
+        private AirMotion(long start, double velocity, double gravity, double y) {
             this.start = start;
+            this.highestY = y;
             int ticks = 0;
             while (velocity > 0 && ticks < 200) {
                 velocity = (velocity - gravity) * .98;
