@@ -29,7 +29,8 @@ public final class AnimationRenderer {
     private static final Map<UUID, Playback> LAST = new HashMap<>();
     private static final Map<AbstractClientPlayer, AirMotion> AIR_MOTION = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Long> LANDINGS = new WeakHashMap<>();
-    private static final Map<AbstractClientPlayer, Boolean> LANDING_WALK = new WeakHashMap<>();
+    private static final Map<AbstractClientPlayer, LandingMovement> LANDING_WALK = new WeakHashMap<>();
+    private static final Map<AbstractClientPlayer, Long> TOUCHDOWNS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Pose> LANDING_ARMS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Double> GROUND_Y = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, HandGesture> HAND_GESTURES = new WeakHashMap<>();
@@ -183,6 +184,7 @@ public final class AnimationRenderer {
             AIR_MOTION.remove(player);
             LANDINGS.remove(player);
             LANDING_WALK.remove(player);
+            TOUCHDOWNS.remove(player);
             LANDING_ARMS.remove(player);
             GROUND_Y.remove(player);
             return null;
@@ -231,9 +233,9 @@ public final class AnimationRenderer {
         Clip landingClip = CLIPS.get("fa_fall_ground");
         boolean landingPlaying = !action && air == null && landingAge >= 0 && landingClip != null && landingAge < landingClip.length;
         if (landingPlaying) {
-            if (moving) LANDING_WALK.put(player, true);
-            else LANDING_WALK.remove(player);
-            clip = LANDING_WALK.containsKey(player) ? "fa_fall_ground_walk_transition" : "fa_fall_ground";
+            LandingMovement landingMovement = LANDING_WALK.get(player);
+            if (landingMovement != null) landingMovement.update(speed > .02, now);
+            clip = landingMovement != null && landingMovement.walking ? "fa_fall_ground_walk_transition" : "fa_fall_ground";
             t = landingAge;
             once = true;
         }
@@ -260,9 +262,20 @@ public final class AnimationRenderer {
         }
         Pose pose = once ? selected.sampleOnce(t) : selected.sample(t);
         if (legPose != null) {
-            pose.rotation.putAll(legPose.rotation);
-            pose.position.putAll(legPose.position);
-            pose.scale.putAll(legPose.scale);
+            Pose gaitPose = CLIPS.get(LEG_CYCLES.get(player).gait).sample(wrapCycle(LEG_CYCLES.get(player).phase)
+                    * CLIPS.get(LEG_CYCLES.get(player).gait).length);
+            float blend = landingPlaying ? (float)Math.clamp((landingAge - 1.25) / .25, 0, 1) : 1;
+            Pose blendedLegs = landingPlaying ? pose.mix(legPose, blend) : legPose;
+            for (String bone : new String[]{"right_leg", "left_leg"}) {
+                if (blendedLegs.rotation.containsKey(bone)) pose.rotation.put(bone, blendedLegs.rotation.get(bone));
+                if (blendedLegs.position.containsKey(bone)) pose.position.put(bone, blendedLegs.position.get(bone));
+                if (blendedLegs.scale.containsKey(bone)) pose.scale.put(bone, blendedLegs.scale.get(bone));
+            }
+            if (landingPlaying) {
+                Pose arms = pose.mix(gaitPose, blend);
+                pose.overlayArm(arms, "right_arm", "right_item");
+                pose.overlayArm(arms, "left_arm", "left_item");
+            }
         }
         if(phase.equals("ACTIVE")){pose.rotation.remove("head");pose.position.remove("head");}
         // Blend clip changes briefly. Filtering every frame delays authored gestures
@@ -355,10 +368,12 @@ public final class AnimationRenderer {
     private static AirMotion updateAirMotion(AbstractClientPlayer player, long now) {
         if (player.onGround() || player.getAbilities().flying) {
             AirMotion previous = AIR_MOTION.remove(player);
+            if (previous != null && previous.fallStart >= 0 && !player.getAbilities().flying) TOUCHDOWNS.put(player, now);
             if (previous != null && previous.fallStart >= 0 && !player.getAbilities().flying
-                    && previous.highestY - player.getY() >= 2.0 - 1e-3) {
+                    && previous.highestY - player.getY() >= 1.0 - 1e-3) {
                 LANDINGS.put(player, now);
-                LANDING_WALK.remove(player);
+                double groundSpeed = Math.hypot(player.getX() - player.xo, player.getZ() - player.zo);
+                LANDING_WALK.put(player, new LandingMovement(previous.horizontalSpeed > .02 || groundSpeed > .02, now));
                 Playback previousPose = LAST.get(player.getUUID());
                 if (previousPose != null) LANDING_ARMS.put(player, previousPose.pose);
                 else LANDING_ARMS.remove(player);
@@ -366,10 +381,11 @@ public final class AnimationRenderer {
             GROUND_Y.put(player, player.getY());
             return null;
         }
-        Long landed = LANDINGS.remove(player);
+        LANDINGS.remove(player);
         LANDING_WALK.remove(player);
         LANDING_ARMS.remove(player);
-        if (landed != null && now - landed <= 2) {
+        Long touchdown = TOUCHDOWNS.remove(player);
+        if (touchdown != null && now - touchdown <= 2) {
             LegCycle legs = LEG_CYCLES.get(player);
             if (legs != null) legs.phase = Math.floor(wrapCycle(legs.phase) * 2 + .001) / 2 + .5;
         }
@@ -377,6 +393,7 @@ public final class AnimationRenderer {
         AirMotion air = AIR_MOTION.computeIfAbsent(player, ignored -> new AirMotion(now, velocity, player.getGravity(),
                 Math.max(player.getY(), GROUND_Y.getOrDefault(player, player.getY()))));
         air.highestY = Math.max(air.highestY, player.getY());
+        air.horizontalSpeed = Math.hypot(player.getX() - player.xo, player.getZ() - player.zo);
         if (velocity <= 0 && air.fallStart < 0) air.fallStart = now;
         return air;
     }
@@ -384,7 +401,7 @@ public final class AnimationRenderer {
     public static void tickMotion(AbstractClientPlayer player) {
         StyleState state = STATES.get(player.getUUID());
         if (state != null && state.phase().equals("ACTIVE")) updateAirMotion(player, player.level().getGameTime());
-        else { AIR_MOTION.remove(player); LANDINGS.remove(player); LANDING_WALK.remove(player); LANDING_ARMS.remove(player); GROUND_Y.remove(player); }
+        else { AIR_MOTION.remove(player); LANDINGS.remove(player); LANDING_WALK.remove(player); LANDING_ARMS.remove(player); TOUCHDOWNS.remove(player); GROUND_Y.remove(player); }
     }
 
     public static double landingCameraOffset(AbstractClientPlayer player, float partialTick) {
@@ -397,6 +414,22 @@ public final class AnimationRenderer {
     }
 
     private record TimedClip(String name, double time, boolean once) {}
+    private static final class LandingMovement {
+        private boolean walking;
+        private boolean candidate;
+        private long candidateSince;
+
+        private LandingMovement(boolean walking, long now) {
+            this.walking = walking;
+            this.candidate = walking;
+            this.candidateSince = now;
+        }
+
+        private void update(boolean moving, long now) {
+            if (moving != candidate) { candidate = moving; candidateSince = now; }
+            if (now - candidateSince >= 2) walking = candidate;
+        }
+    }
     private record Attack(int combo, long start) {}
     private record ArmAttacks(Attack right, Attack left) {}
     private record ArmSource(String clip, long start) {}
@@ -476,6 +509,7 @@ public final class AnimationRenderer {
         private final long start;
         private final int ascentTicks;
         private double highestY;
+        private double horizontalSpeed;
         private long fallStart = -1;
 
         private AirMotion(long start, double velocity, double gravity, double y) {
