@@ -25,7 +25,6 @@ function sampleBezier(key, next, start, end, axis, span, t) {
 }
 
 for (const animation of input.animations || []) {
-  if (['walk_left', 'walk_right'].includes(animation.name)) continue;
   const loop = animation.loop === 'loop';
   const bones = {};
   let lastKeyTime = 0;
