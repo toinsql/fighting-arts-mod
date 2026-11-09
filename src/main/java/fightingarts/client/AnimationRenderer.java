@@ -260,6 +260,14 @@ public final class AnimationRenderer {
         } else {
             LEG_CYCLES.remove(player);
         }
+        // Hold the last airborne pose during the short re-jump window. Rendering
+        // the landing clip at time zero here would still make it flash on screen.
+        LandingMovement landingMovement = LANDING_WALK.get(player);
+        Pose heldPose = LANDING_ARMS.get(player);
+        if (landingPlaying && landingMovement != null && landingMovement.waitForJump
+                && renderTick - landing < 2 && heldPose != null) {
+            return heldPose;
+        }
         Pose pose = once ? selected.sampleOnce(t) : selected.sample(t);
         if (legPose != null) {
             Pose gaitPose = CLIPS.get(LEG_CYCLES.get(player).gait).sample(wrapCycle(LEG_CYCLES.get(player).phase)
@@ -373,7 +381,8 @@ public final class AnimationRenderer {
                     && previous.highestY - player.getY() >= 1.0 - 1e-3) {
                 LANDINGS.put(player, now);
                 double groundSpeed = Math.hypot(player.getX() - player.xo, player.getZ() - player.zo);
-                LANDING_WALK.put(player, new LandingMovement(previous.horizontalSpeed > .02 || groundSpeed > .02, now));
+                LANDING_WALK.put(player, new LandingMovement(previous.horizontalSpeed > .02 || groundSpeed > .02,
+                        previous.sprinting || player.isSprinting(), now));
                 Playback previousPose = LAST.get(player.getUUID());
                 if (previousPose != null) LANDING_ARMS.put(player, previousPose.pose);
                 else LANDING_ARMS.remove(player);
@@ -394,6 +403,7 @@ public final class AnimationRenderer {
                 Math.max(player.getY(), GROUND_Y.getOrDefault(player, player.getY()))));
         air.highestY = Math.max(air.highestY, player.getY());
         air.horizontalSpeed = Math.hypot(player.getX() - player.xo, player.getZ() - player.zo);
+        air.sprinting = player.isSprinting();
         if (velocity <= 0 && air.fallStart < 0) air.fallStart = now;
         return air;
     }
@@ -417,10 +427,12 @@ public final class AnimationRenderer {
     private static final class LandingMovement {
         private boolean walking;
         private boolean candidate;
+        private final boolean waitForJump;
         private long candidateSince;
 
-        private LandingMovement(boolean walking, long now) {
+        private LandingMovement(boolean walking, boolean sprinting, long now) {
             this.walking = walking;
+            this.waitForJump = walking && sprinting;
             this.candidate = walking;
             this.candidateSince = now;
         }
@@ -510,6 +522,7 @@ public final class AnimationRenderer {
         private final int ascentTicks;
         private double highestY;
         private double horizontalSpeed;
+        private boolean sprinting;
         private long fallStart = -1;
 
         private AirMotion(long start, double velocity, double gravity, double y) {
