@@ -205,19 +205,21 @@ public final class AnimationRenderer {
         AirMotion air = updateAirMotion(player, now);
         LegCycle cycle = LEG_CYCLES.computeIfAbsent(player, ignored -> new LegCycle());
         String crouchIdle = wrapCycle(cycle.phase) >= .25 && wrapCycle(cycle.phase) < .75 ? "fa_idle_crouch2" : "fa_idle_crouch";
+        double idlePhase = wrapCycle(cycle.phase);
+        String standingIdle = idlePhase >= .17 && idlePhase < .55 ? "fa_idle2" : "fa_idle";
         String clip = switch (phase) {
             case "DRAWING" -> entering ? "fa_enter_mode" : "fa_idle";
             case "SHEATHING" -> "fa_exit_mode";
             case "ACTIVE" -> combo != null
                     ? combo
-                    : player.isCrouching() ? (moving ? "fa_walk_crouch" : crouchIdle) : moving ? (player.isSprinting() ? "fa_run" : walkingBackwards(player) ? "fa_walk_back" : "fa_walk") : "fa_idle";
+                    : player.isCrouching() ? (moving ? "fa_walk_crouch" : crouchIdle) : moving ? (player.isSprinting() ? "fa_run" : walkingBackwards(player) ? "fa_walk_back" : "fa_walk") : standingIdle;
             default -> player.isCrouching() ? (moving ? "fa_walk_crouch" : crouchIdle) : null;
         };
         double t = combo == null ? age : comboTime;
         boolean action = entry || phase.equals("SHEATHING") || combo != null;
         if (clip == null && flying) clip = "fa_idle";
         if (!action && flying) t = renderTick / 20;
-        if ("fa_idle".equals(clip)) {
+        if ("fa_idle".equals(clip) || "fa_idle2".equals(clip)) {
             if (entry) t = (ageTicks - StyleService.DRAW_TICKS) / 20;
             else if (phase.equals("ACTIVE")) t = (ageTicks + StyleService.ENTRY_TICKS - StyleService.DRAW_TICKS) / 20;
         }
@@ -264,10 +266,8 @@ public final class AnimationRenderer {
         // the landing clip at time zero here would still make it flash on screen.
         LandingMovement landingMovement = LANDING_WALK.get(player);
         Pose heldPose = LANDING_ARMS.get(player);
-        if (landingPlaying && landingMovement != null && landingMovement.waitForJump
-                && renderTick - landing < 2 && heldPose != null) {
-            return heldPose;
-        }
+        boolean waitingForJump = landingPlaying && landingMovement != null && landingMovement.waitForJump
+                && renderTick - landing < 2 && heldPose != null;
         Pose pose = once ? selected.sampleOnce(t) : selected.sample(t);
         if (legPose != null) {
             Pose gaitPose = CLIPS.get(LEG_CYCLES.get(player).gait).sample(wrapCycle(LEG_CYCLES.get(player).phase)
@@ -286,14 +286,16 @@ public final class AnimationRenderer {
             }
         }
         if(phase.equals("ACTIVE")){pose.rotation.remove("head");pose.position.remove("head");}
+        if (waitingForJump) pose = heldPose;
         // Blend clip changes briefly. Filtering every frame delays authored gestures
         // and softens stepped keyframes by a different amount at each frame rate.
         Playback previous = LAST.get(playerId);
+        String source = waitingForJump ? "landing_wait" : clip + "|" + (legPose == null ? "" : cycle.gait);
         Pose transitionFrom = null;
         double transitionStart = renderTick;
-        if (!entering && !(landingPlaying && (previous == null || !previous.clip.startsWith("fa_fall_ground"))) && previous != null
-                && renderTick >= previous.renderTick && renderTick - previous.renderTick < TRANSITION_TICKS) {
-            if (!clip.equals(previous.clip)) {
+        if (previous != null
+                && renderTick >= previous.renderTick && renderTick - previous.renderTick < 20) {
+            if (!source.equals(previous.source)) {
                 transitionFrom = previous.pose;
             } else if (renderTick - previous.transitionStart < TRANSITION_TICKS) {
                 transitionFrom = previous.transitionFrom;
@@ -301,10 +303,11 @@ public final class AnimationRenderer {
             }
         }
         if (transitionFrom != null) {
-            pose = transitionFrom.mix(pose, (float)((renderTick - transitionStart) / TRANSITION_TICKS));
+            float progress = (float)Math.clamp((renderTick - transitionStart) / TRANSITION_TICKS, 0, 1);
+            pose = transitionFrom.mix(pose, progress * progress * (3 - 2 * progress));
         }
         Pose landingArms = LANDING_ARMS.get(player);
-        if (landingPlaying && landingArms != null && landingAge < .2) {
+        if (landingPlaying && !waitingForJump && landingArms != null && landingAge < .2) {
             float progress = (float)Math.clamp(landingAge / .2, 0, 1);
             progress = progress * progress * (3 - 2 * progress);
             Pose arms = landingArms.mix(pose, progress);
@@ -318,7 +321,7 @@ public final class AnimationRenderer {
                 if (continuingRight != null) pose.overlayArm(continuingRight, "right_arm", "right_item");
             }
         }
-        LAST.put(playerId, new Playback(clip, pose, renderTick, transitionFrom, transitionStart));
+        LAST.put(playerId, new Playback(clip, source, pose, renderTick, transitionFrom, transitionStart));
         return pose;
     }
 
@@ -677,7 +680,7 @@ public final class AnimationRenderer {
         return playback == null ? new float[]{0,0,0,0,0,0,1,1,1} : playback.pose.transform(bone);
     }
 
-    private record Playback(String clip, Pose pose, double renderTick, Pose transitionFrom, double transitionStart) {}
+    private record Playback(String clip, String source, Pose pose, double renderTick, Pose transitionFrom, double transitionStart) {}
     private record Clip(float length, boolean loop, Map<String,Map<Float,float[]>> rotation, Map<String,Map<Float,float[]>> position,Map<String,Map<Float,float[]>> scale) {
         static Clip read(JsonObject o) {
             float len=o.has("animation_length")?o.get("animation_length").getAsFloat():1;
