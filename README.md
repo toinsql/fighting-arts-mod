@@ -74,3 +74,5 @@ Correções posteriores: a pose do estilo substitui a locomoção vanilla nas pa
 O salto usa um impulso balístico com gravidade e arrasto vanilla. A mira procura uma superfície alcançável em até 20 blocos horizontais, inclusive o topo de tetos. Ao mirar no chão sob um teto baixo, o arco diminui até caber no espaço. O salto pode ser lançado no ar. Outras skills interrompem o salto; a Investida pula a preparação após 10 ticks no ar. Atacar durante o salto usa os combos normais quando não há acerto. Um acerto confirmado executa diretamente `hit_falling`, inclusive contra mobs no chão. A preparação automática do ataque caindo fica suspensa até 10 ticks após o pouso, ou até um novo pulo.
 
 Os testes integrados e as capturas podem ser repetidos com `tools/testing/run-client-check.ps1 -WorldPath <pasta-de-um-mundo-de-teste>`. O script usa uma cópia temporária do mundo e mantém a instrumentação fora do JAR. Veja `docs/TESTING.md`.
+
+No modo ataque, colocação, descarte e quebra de blocos ficam bloqueados. Cliques em blocos executam ataques. As skills têm sons vanilla sincronizados e avisos de recarga, energia insuficiente e salto sem destino alcançável.

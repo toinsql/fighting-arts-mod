@@ -24,3 +24,11 @@ Verificações automatizadas:
 As capturas permitem inspecionar a trajetória, aterrissagem, marcas em mobs e corte em cantos. O comando de debug recompõe energia e recargas entre cenários. Falhas de asserção interrompem a execução e aparecem no log; o script exige `FA-REVIEW PASS` e ausência de `FA-...FAIL`.
 
 Última execução integrada aprovada: ápice de 10,0000015 blocos e diferença de 0,0764 bloco entre destino previsto e posição final no teste plano. Não é um teste de latência em servidor dedicado nem de todos os modelos de entidades de terceiros.
+
+## Revisão do modo comum
+
+A suíte também verifica energia insuficiente, recargas, pedidos duplicados, valores não finitos, segunda mão ocupada, descarte por Q/Ctrl+Q e pelo inventário, colocação e quebra de blocos, restauração da quebra fora do modo, entrada simples, cinematográfica de upgrade e cancelamento da skill ao remover uma espada.
+
+Para verificar a inicialização e o encerramento em servidor dedicado, execute `tools/testing/run-server-check.ps1`. Esse script cria um mundo temporário, usa uma porta local automática e encerra após `ServerStartedEvent`. Ele exige a marca `FA-DEDICATED PASS`, pois a tarefa Gradle pode terminar com sucesso mesmo quando o carregamento de um mod falha. A instrumentação fica fora do JAR. Os complementos visuais do cliente permanecem na execução de cliente.
+
+Veja `QA_SANTORYU.md` para os resultados e as limitações da revisão.

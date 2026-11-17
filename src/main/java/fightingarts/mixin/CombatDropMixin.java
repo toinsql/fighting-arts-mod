@@ -25,6 +25,7 @@ abstract class CombatDropMixin {
     }
     @Inject(method="handleContainerClick",at=@At("HEAD"),cancellable=true)
     private void fightingarts$inventoryDrop(ServerboundContainerClickPacket packet,CallbackInfo callback) {
+        net.minecraft.network.protocol.PacketUtils.ensureRunningOnSameThread(packet,(ServerGamePacketListenerImpl)(Object)this,player.serverLevel());
         if(CombatRestrictions.active(player) && (packet.getClickType()==ClickType.THROW
                 || packet.getSlotNum()==-999 && packet.getClickType()==ClickType.PICKUP)) {
             callback.cancel();player.containerMenu.sendAllDataToRemote();

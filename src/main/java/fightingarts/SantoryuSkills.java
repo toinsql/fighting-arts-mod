@@ -153,13 +153,23 @@ public final class SantoryuSkills {
         if(style==null || style.mode()!=StyleMode.COMMON || !style.phase().equals("ACTIVE")
                 || !p.isAlive() || p.isSpectator() || p.isPassenger() || !p.getOffhandItem().isEmpty()
                 || StyleService.findSwords(p).size()!=3 || stunned(p) || (c.skill!=0 && c.skill!=4)
-                || StyleService.isAttackLocked(style.phase(),style.combo(),now-style.comboStart())
-                || now<c.ready[id-1] || c.energy<COST[id-1])return;
+                || StyleService.isAttackLocked(style.phase(),style.combo(),now-style.comboStart()))return;
+        if (now < c.ready[id-1]) {
+            p.displayClientMessage(Component.literal("Habilidade em recarga (" + ((c.ready[id-1]-now+19)/20) + " s)."),true);
+            return;
+        }
+        if (c.energy < COST[id-1]) {
+            p.displayClientMessage(Component.literal("Energia insuficiente ("+c.energy+"/"+COST[id-1]+")."),true);
+            return;
+        }
         LeapTrajectory.Plan leap = null;
         if (id == 4) {
             if (p.getAbilities().flying || p.isInWater() || p.isInLava()) return;
             leap = LeapTrajectory.aim(p, p.position(), p.getEyePosition(), p.getLookAngle());
-            if (leap == null) return;
+            if (leap == null) {
+                p.displayClientMessage(Component.literal("Nenhuma superfície alcançável para o salto."),true);
+                return;
+            }
         }
         boolean quickDash = id == 1 && c.leapStart >= 0 && c.leapLanded < 0
                 && now - c.leapStart >= 10;
@@ -178,10 +188,14 @@ public final class SantoryuSkills {
             p.setOnGround(false);p.setDeltaMovement(leap.velocity());p.hurtMarked=false;p.hasImpulse=true;
             effect(p,7,p.position(),leap.velocity(),p.getId());
         }
+        sound(p, net.minecraft.sounds.SoundEvents.PLAYER_ATTACK_SWEEP, .5f, id==3 ? .65f : 1.2f);
         if (quickDash) dash(p,c,6,1);
         sync(p,c);
     }
 
+    private static void sound(ServerPlayer player, net.minecraft.sounds.SoundEvent sound, float volume, float pitch) {
+        player.level().playSound(null,player.blockPosition(),sound,net.minecraft.sounds.SoundSource.PLAYERS,volume,pitch);
+    }
     private static Vec3 safeMove(ServerPlayer p,Vec3 desired) {
         return safeMove(p, desired, Set.of());
     }
@@ -333,6 +347,7 @@ public final class SantoryuSkills {
             if(c.skill==1 && age>=c.preparationTicks && !c.dashed)dash(p,c,6,1);
             if(c.skill==2 && age==3)moonSlash(p,c);
             if(c.skill==3) {
+                if(age>=13 && age<43 && (age-13)%10==0) sound(p,net.minecraft.sounds.SoundEvents.PLAYER_ATTACK_SWEEP,.28f, .8f+(age-13)/30f);
                 if(age<43){c.direction=Vec3.directionFromRotation(0,p.getYRot());safeMove(p,c.anchor);}
                 if(age==43){dash(p,c,10,3);c.anchor=p.position();}
                 if(age>43)safeMove(p,c.anchor);
@@ -342,6 +357,7 @@ public final class SantoryuSkills {
                 p.fallDistance=0;
                 if(c.leapAirborne && p.onGround() && c.leapLanded<0) {
                     c.leapLanded=now;
+                    sound(p,net.minecraft.sounds.SoundEvents.PLAYER_SMALL_FALL,.6f,1.1f);
                     effect(p,8,p.position(),p.position(),p.getId());
                     if(c.skill==4){c.skill=0;sync(p,c);}
                 }
@@ -371,6 +387,8 @@ public final class SantoryuSkills {
     }
     private static void dash(ServerPlayer p,Combat c,double distance,int kind) {
         c.dashed=true;
+        sound(p,net.minecraft.sounds.SoundEvents.TRIDENT_THROW.value(),kind==3 ? .9f : .6f,kind==3 ? .65f : 1.1f);
+        if(kind==3) sound(p,net.minecraft.sounds.SoundEvents.PLAYER_ATTACK_KNOCKBACK,.9f,.7f);
         Vec3 from=p.position();
         c.direction=Vec3.directionFromRotation(0,p.getYRot());
         Vec3 requested=c.direction.scale(distance);

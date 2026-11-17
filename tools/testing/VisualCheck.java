@@ -228,6 +228,9 @@ final class VisualCheck {
         });
         if(tick==720){
             MC.player.drop(false);MC.player.drop(true);
+            MC.getConnection().send(new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(
+                MC.player.containerMenu.containerId,MC.player.containerMenu.getStateId(),8,0,
+                net.minecraft.world.inventory.ClickType.THROW,ItemStack.EMPTY,new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>()));
             MC.gameMode.useItemOn(MC.player,net.minecraft.world.InteractionHand.MAIN_HAND,
                 new net.minecraft.world.phys.BlockHitResult(new net.minecraft.world.phys.Vec3(210.5,101.6,-288),net.minecraft.core.Direction.NORTH,new BlockPos(210,101,-288),false));
         }
@@ -244,6 +247,12 @@ final class VisualCheck {
             require(fightingarts.client.StyleClient.local().combo()>0,"short block click plays combat combo");
         }
         if(tick==740)require(!MC.gameMode.isDestroying(),"holding cannot start mining in attack mode");
+        if(tick==770)server(VisualCheck::testSkillGuards);
+        if(tick==790)server(p->{
+            var before=p.getPersistentData().getInt("fightingarts_energy");
+            use(p,2,0);
+            require(p.getPersistentData().getInt("fightingarts_energy")==before,"cooldown rejection never consumes energy");
+        });
         if(tick==830){
             MC.options.keyAttack.setDown(false);
             server(p->require(!p.level().getBlockState(new BlockPos(210,101,-288)).isAir(),"holding attack preserves block"));
@@ -256,7 +265,31 @@ final class VisualCheck {
             require(!CombatRestrictions.active(p),"attack mode exited");
             require(p.gameMode.destroyBlock(new BlockPos(210,101,-288)),"normal block breaking restored outside attack mode");
         });
-        if(tick==1060){System.out.println("FA-REVIEW PASS");MC.stop();}
+        if(tick==1060)server(p->{
+            p.getInventory().setItem(8,ItemStack.EMPTY);
+            p.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND,new ItemStack(Items.SHIELD));
+            StyleService.toggle(p,StyleMode.COMMON);
+            require(!CombatRestrictions.active(p),"offhand prevents mode entry");
+            p.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND,ItemStack.EMPTY);
+            StyleService.toggle(p,StyleMode.SIMPLE);
+        });
+        if(tick==1085)server(p->{
+            require(StyleService.current(p).mode()==StyleMode.SIMPLE && StyleService.current(p).phase().equals("ACTIVE"),"simple entry completes");
+            reset(p);use(p,1,0);
+            require(p.getPersistentData().getInt("fightingarts_energy")==200,"simple mode cannot cast common skills");
+            StyleService.toggle(p,StyleMode.COMMON);
+        });
+        if(tick==1120)require(fightingarts.client.StyleClient.local().phase().equals("UPGRADING"),"simple upgrade retains cinematic duration");
+        if(tick==1185)require(fightingarts.client.StyleClient.local().phase().equals("ACTIVE"),"upgrade restores player control");
+        if(tick==1200)server(p->{reset(p);use(p,3,0);});
+        if(tick==1210)server(p->StyleWeapons.of(p).setItem(0,ItemStack.EMPTY));
+        if(tick==1218){
+            require(fightingarts.client.SkillHud.local().skill()==0,"losing a style sword cancels active skill");
+            require(!fightingarts.client.SkillHud.movementLocked(),"cancellation releases movement");
+            require(!fightingarts.client.StyleClient.attackMode(),"missing sword exits mode");
+            captureOnce("cancelled-skill-restores-hud");
+        }
+        if(tick==1230){System.out.println("FA-REVIEW PASS");MC.stop();}
     }
     static net.minecraft.world.phys.Vec3 expected;
     static double maxY=100,lowApex=100;
@@ -290,6 +323,33 @@ final class VisualCheck {
     static void clickAttack() {
         try {var method=Minecraft.class.getDeclaredMethod("startAttack");method.setAccessible(true);method.invoke(MC);}
         catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
+    }
+    static void use(ServerPlayer p,int skill,float distance) {
+        try {var method=SantoryuSkills.class.getDeclaredMethod("use",ServerPlayer.class,int.class,float.class);method.setAccessible(true);method.invoke(null,p,skill,distance);}
+        catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
+    }
+    static void testSkillGuards(ServerPlayer p) {
+        try {
+            reset(p);
+            var method=SantoryuSkills.class.getDeclaredMethod("combat",ServerPlayer.class);method.setAccessible(true);
+            Object combat=method.invoke(null,p);
+            var energy=combat.getClass().getDeclaredField("energy");energy.setAccessible(true);
+            energy.setInt(combat,0);use(p,1,0);
+            require(p.getPersistentData().getLongArray("fightingarts_cooldowns")[0]==0,"insufficient energy never starts cooldown");
+            reset(p);
+            p.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND,new ItemStack(Items.SHIELD));
+            use(p,1,0);
+            require(p.getPersistentData().getInt("fightingarts_energy")==200,"offhand blocks skills without spending energy");
+            p.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND,ItemStack.EMPTY);
+            use(p,1,Float.NaN);use(p,1,Float.POSITIVE_INFINITY);
+            require(p.getPersistentData().getLongArray("fightingarts_cooldowns")[0]==0,"nonfinite request rejected");
+            use(p,2,0);
+            int after=p.getPersistentData().getInt("fightingarts_energy");
+            require(after==185,"skill 2 costs exactly 15 energy");
+            use(p,2,0);
+            require(p.getPersistentData().getInt("fightingarts_energy")==after,"busy skill cannot be charged twice");
+            System.out.println("FA-GUARDS PASS energy cooldown offhand invalid packets and duplicate requests");
+        }catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
     }
     static void reset(ServerPlayer p){p.server.getCommands().performPrefixedCommand(p.createCommandSourceStack().withPermission(2),"fightingarts debug reset");}
 
