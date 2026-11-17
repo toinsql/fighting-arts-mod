@@ -3,6 +3,8 @@ package fightingarts.client;
 import com.google.gson.*;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.math.Axis;
+import fightingarts.StyleService;
+import fightingarts.StyleMode;
 import fightingarts.StyleState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Camera;
@@ -42,6 +44,18 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
         StyleState s=AnimationRenderer.STATES.get(p.getUUID());if(s==null||s.swords().size()<3||p.isInvisible())return;
         double t=(p.level().getGameTime()-s.phaseStart()+partial)/20.0;
         if(s.phase().equals("OFF")){drawWaist(pose,buffers,light,p,s.swords(),"OFF",-1);return;}
+        if (s.phase().equals(StyleService.SIMPLE_DRAWING)) {
+            drawWaist(pose, buffers, light, p, s.swords(), s.phase(), t);
+        }
+        if(s.phase().equals("UPGRADING") && t * 20 < StyleService.DRAW_TICKS) {
+            t = StyleService.upgradeAnimationSeconds(t * 20);
+            drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
+            drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(t>=1.29167 && t<1.66667?2:0),t>=1.29167 && t<1.66667?2:0);
+            drawSword(pose,buffers,light,p,partial,"left_extra",getParentModel().leftArm,transform(p,"left_item2"),s.swords().get(0),0);
+            if(t < 1.29167) drawWaist(pose,buffers,light,p,s.swords(),"SIMPLE_ACTIVE",t);
+            drawSword(pose,buffers,light,p,partial,"mouth",getParentModel().head,transform(p,"right_item2"),s.swords().get(2),2);
+            return;
+        }
         if(s.phase().equals("DRAWING")){
             drawWaist(pose,buffers,light,p,s.swords(),s.phase(),t);
             if(t>=.5&&t<1.16667)drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
@@ -52,7 +66,10 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
             if(t>=2.625)drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
             return;
         }
-        if(s.phase().equals("SHEATHING")){
+        if(s.phase().equals("SHEATHING") && s.mode() == StyleMode.SIMPLE) {
+            drawWaist(pose, buffers, light, p, s.swords(), "SIMPLE_SHEATHING", t);
+        }
+        if(s.phase().equals("SHEATHING") && s.mode() == StyleMode.COMMON){
             drawWaist(pose,buffers,light,p,s.swords(),s.phase(),t);
             if(t<.41667)drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
             if(t<.58333)drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
@@ -60,9 +77,17 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
             drawSword(pose,buffers,light,p,partial,"left_extra",getParentModel().leftArm,transform(p,"left_item2"),s.swords().get(2),2);
             return;
         }
-        drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
-        drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
-        drawSword(pose,buffers,light,p,partial,"mouth",getParentModel().head,transform(p,"right_item2"),s.swords().get(2),2);
+        double spin = SwordModel.spinAge(p, partial);
+        if (spin >= 0) {
+            SwordModel.renderSpin(pose, buffers, light, p, s.swords(), false, spin);
+        } else {
+            drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
+            drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
+        }
+        if (s.mode() == StyleMode.SIMPLE) {
+            if (!s.phase().equals(StyleService.SIMPLE_DRAWING) && !s.phase().equals("SHEATHING"))
+                drawWaist(pose,buffers,light,p,s.swords(),"SIMPLE_ACTIVE",t);
+        } else drawSword(pose,buffers,light,p,partial,"mouth",getParentModel().head,transform(p,"right_item2"),s.swords().get(2),2);
     }
 
     private void drawSword(PoseStack stack,MultiBufferSource buffers,int light,AbstractClientPlayer p,float partial,String key,net.minecraft.client.model.geom.ModelPart anchor,float[] t,ItemStack item,int swordIndex){
@@ -71,7 +96,7 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
         String bone=switch(key){case "left_main"->"left_item";case "left_extra"->"left_item2";case "right_main"->"right_item";default->"right_item2";};
         Group attachment=GROUPS.get(bone); Group parent=attachment==null?null:GROUPS.get(attachment.parent);
         if(attachment!=null&&parent!=null){float[] offset=sub(attachment.origin,parent.origin);float[] rotation=attachment.rotation;
-            offset[0]+=t[0];offset[1]+=t[1];offset[2]+=t[2];rotation=new float[]{rotation[0]+t[3],rotation[1]+t[4],rotation[2]+t[5]};
+            offset[0]+=t[0]+(key.equals("mouth")?0:SwordModel.slimHandOffset(p,key.startsWith("left_")));offset[1]+=t[1];offset[2]+=t[2];rotation=new float[]{rotation[0]+t[3],rotation[1]+t[4],rotation[2]+t[5]};
             translate(stack,offset);rotate(stack,rotation);stack.scale(t[6],t[7],t[8]);}
         Group attach=GROUPS.get(bone),adjust=GROUPS.get(ADJUSTMENTS.get(key));
         if(attach!=null&&adjust!=null){translate(stack,sub(adjust.origin,attach.origin));rotate(stack,adjust.rotation);}
@@ -96,6 +121,9 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
     }
     private static boolean waistVisible(int slot,String phase,double t){
         if(phase.equals("OFF"))return true;
+        if(phase.equals("SIMPLE_ACTIVE"))return slot==2;
+        if(phase.equals(StyleService.SIMPLE_DRAWING))return slot==2 || t<.5;
+        if(phase.equals("SIMPLE_SHEATHING"))return slot==2 || t>=(slot==0?.41667:.58333);
         if(phase.equals("DRAWING"))return t<(slot==2?1.91667:.5);
         if(phase.equals("SHEATHING"))return t>=(slot==0?.41667:slot==1?.58333:2.04167);
         return false;

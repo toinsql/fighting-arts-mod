@@ -4,6 +4,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import fightingarts.StyleState;
+import fightingarts.SantoryuSkills;
+import fightingarts.StyleMode;
 import fightingarts.StyleService;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.player.AbstractClientPlayer;
@@ -26,16 +28,21 @@ public final class AnimationRenderer {
     private static final Map<String, Clip> CLIPS = new HashMap<>();
     private static final double TRANSITION_TICKS = 2;
     private static final double FIRST_PERSON_TRANSITION_TICKS = 3;
+    private static final double FIRST_PERSON_FALLING_ENTRY_TICKS = 5;
+    private static final double FIRST_PERSON_FALLING_HIT_END_SECONDS = 1.75;
     private static final Map<UUID, Playback> LAST = new HashMap<>();
+    private static final Map<AbstractClientPlayer, FreeArmBlends> FREE_ARM_BLENDS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, AirMotion> AIR_MOTION = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Long> LANDINGS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, LandingMovement> LANDING_WALK = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Long> TOUCHDOWNS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Pose> LANDING_ARMS = new WeakHashMap<>();
+    private static final Map<AbstractClientPlayer, EntryLanding> ENTRY_LANDINGS = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, Double> GROUND_Y = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, HandGesture> HAND_GESTURES = new WeakHashMap<>();
     private static final Map<AbstractClientPlayer, FirstPersonBlend> HAND_BLEND = new WeakHashMap<>();
     private static final Map<UUID, ArmAttacks> ATTACKS = new HashMap<>();
+    private static final Map<UUID, Attack> LANDING_INTERRUPTED = new HashMap<>();
     private static final Map<AbstractClientPlayer, LegCycle> LEG_CYCLES = new WeakHashMap<>();
     private static final Map<String,JsonObject> RIG = new java.util.LinkedHashMap<>();
 
@@ -66,12 +73,23 @@ public final class AnimationRenderer {
         ArmAttacks old = ATTACKS.get(player);
         Attack attack = new Attack(current.combo(), current.comboStart());
         Attack right = current.combo() == 2 ? (old == null ? null : old.right) : attack;
-        Attack left = current.combo() == 1 ? null : attack;
+        Attack left = current.combo() == 1 ? (old == null ? null : old.left) : attack;
         ATTACKS.put(player, new ArmAttacks(right, left));
     }
 
     static void clearAttacks() {
         ATTACKS.clear();
+        LANDING_INTERRUPTED.clear();
+    }
+
+    static void entryStateChanged(AbstractClientPlayer player, StyleState previous, StyleState current) {
+        if (previous != null && previous.phase().equals("DRAWING") && current.phase().equals("DRAWING")
+                && previous.phaseStart() == current.phaseStart() && previous.entryAirborne() && !current.entryAirborne()
+                && !ENTRY_LANDINGS.containsKey(player)) {
+            Playback last = LAST.get(player.getUUID());
+            ENTRY_LANDINGS.put(player, new EntryLanding(player.level().getGameTime(), current.phaseStart(),
+                    last == null ? null : last.pose));
+        }
     }
 
     /** Samples the authored first-person pose without changing the shared third-person pose. */
@@ -82,9 +100,22 @@ public final class AnimationRenderer {
         FirstPersonBlend playback = HAND_BLEND.computeIfAbsent(player, ignored -> new FirstPersonBlend());
         playback.clock.update(renderTick, player.isCrouching());
         AirMotion air = updateAirMotion(player, now);
+        interruptAttacksOnLanding(player, state, renderTick, air);
         HandGesture gesture = HAND_GESTURES.computeIfAbsent(player, ignored -> new HandGesture());
         if (!state.phase().equals("ACTIVE")) {
             gesture.stop(now);
+            boolean simpleDraw = state.phase().equals(StyleService.SIMPLE_DRAWING);
+            boolean simpleSheath = state.phase().equals("SHEATHING") && state.mode() == StyleMode.SIMPLE;
+            if (simpleDraw || simpleSheath || state.phase().equals("UPGRADING")) {
+                String name = state.phase().equals("UPGRADING") ? "fa_enter_mode_common2" : simpleDraw ? "fa_enter_mode_simple" : "fa_exit_mode_simple";
+                Clip clip = CLIPS.get(name);
+                if (clip == null) return null;
+                ArmSource source = new ArmSource(name, state.phaseStart());
+                double elapsed = renderTick - state.phaseStart();
+                Pose pose = clip.sampleOnce(state.phase().equals("UPGRADING")
+                        ? StyleService.upgradeAnimationSeconds(elapsed) : elapsed / 20);
+                return blendFirstPerson(player, pose, source, source, playback.clock.time);
+            }
             Clip sheath = CLIPS.get("fa_fp_embainhar");
             if (!state.phase().equals("SHEATHING") || sheath == null) {
                 HAND_BLEND.remove(player);
@@ -96,6 +127,7 @@ public final class AnimationRenderer {
         }
         boolean moving = player.getX() != player.xo || player.getZ() != player.zo;
         String movement = !player.isCrouching() && moving ? (player.isSprinting() ? "fa_fp_run" : "fa_fp_walk") : "fa_fp_idle";
+        TimedClip fallingOverlay = fallingAction(state, true, renderTick, state.fallingAttackStart() >= 0);
         TimedClip base = air == null
                 ? new TimedClip(movement, playback.clock.time / 20, false)
                 : air.animation("fa_fp_", playback.air.elapsed(air.stageStart(), playback.clock));
@@ -107,7 +139,7 @@ public final class AnimationRenderer {
                 : sampleAttack(right, true, right.start + playback.rightAttack.elapsed(right.start, playback.clock));
         Pose leftPose = left == null ? null : left.equals(right) ? rightPose
                 : sampleAttack(left, true, left.start + playback.leftAttack.elapsed(left.start, playback.clock));
-        boolean canPlayGesture = baseClip != null && rightPose == null && leftPose == null;
+        boolean canPlayGesture = fallingOverlay == null && baseClip != null && rightPose == null && leftPose == null;
         boolean falling = air != null && air.fallStart >= 0;
         double gestureTime = gesture.clip == null ? 0 : playback.gesture.elapsed(gesture.start, playback.clock) / 20;
         gesture.update(now, canPlayGesture, falling, gestureTime);
@@ -118,7 +150,17 @@ public final class AnimationRenderer {
         Pose pose = base.once ? baseClip.sampleOnce(base.time) : baseClip.sample(base.time);
         ArmSource rightSource = new ArmSource(base.name, air == null ? 0 : air.start);
         ArmSource leftSource = rightSource;
-        if (rightPose != null || leftPose != null) {
+        if (fallingOverlay != null) {
+            Clip overlayClip = CLIPS.get(fallingOverlay.name);
+            if (overlayClip != null) {
+                Pose overlay = fallingOverlay.once ? overlayClip.sampleOnce(fallingOverlay.time) : overlayClip.sample(fallingOverlay.time);
+                overlayFallingArms(pose, overlay);
+                FirstPersonStyleRenderer.positionFallingArms(pose);
+                long start = fallingOverlay.name.equals("fa_fp_hitfalling") ? state.fallingHitStart() : state.fallingAttackStart();
+                rightSource = leftSource = new ArmSource(fallingOverlay.name, start);
+            }
+        }
+        if (fallingOverlay == null && (rightPose != null || leftPose != null)) {
             if (rightPose != null) {
                 pose.overlayArm(rightPose, "right_arm", "right_item");
                 rightSource = new ArmSource("fa_fp_hitcombo" + right.combo, right.start);
@@ -127,7 +169,7 @@ public final class AnimationRenderer {
                 pose.overlayArm(leftPose, "left_arm", "left_item");
                 leftSource = new ArmSource("fa_fp_hitcombo" + left.combo, left.start);
             }
-        } else if (gesture.clip != null) {
+        } else if (fallingOverlay == null && gesture.clip != null) {
             Pose overlay = gesture.clip.sampleOnce(playback.gesture.elapsed(gesture.start, playback.clock) / 20);
             ArmSource source = new ArmSource(gesture.left ? "fa_fp_random_left" : "fa_fp_random_right", gesture.start);
             if (gesture.left) {
@@ -138,7 +180,63 @@ public final class AnimationRenderer {
                 rightSource = source;
             }
         }
+        var skill = SkillHud.STATUS.get(player.getUUID());
+        pose = skillPose(pose, skill, renderTick, true);
+        if (skill != null && skill.skill() != 0) rightSource = leftSource = new ArmSource("skill:" + skill.skill() + ":" + (renderTick-skill.start()<skill.preparationTicks()), skill.start());
         return blendFirstPerson(player, pose, rightSource, leftSource, playback.clock.time);
+    }
+
+    static Pose firstPersonIdlePose() {
+        Clip idle = CLIPS.get("fa_fp_idle");
+        return idle == null ? null : idle.sample(0);
+    }
+
+    private static Pose skillPose(Pose base, SantoryuSkills.Status skill, double tick, boolean firstPerson) {
+        if (skill == null || skill.skill() == 0) return base;
+        double age = (tick - skill.start()) / 20;
+        var skillPlayer = net.minecraft.client.Minecraft.getInstance().level == null ? null
+                : net.minecraft.client.Minecraft.getInstance().level.getPlayerByUUID(skill.player());
+        boolean rising = skillPlayer != null && skillPlayer.getDeltaMovement().y > 0;
+        double preparation = skill.preparationTicks() / 20.0;
+        String name = switch (skill.skill()) {
+            case 1 -> firstPerson ? (age < preparation ? "fa_fp_attack_falling" : "fa_fp_hitfalling")
+                    : (age < preparation ? "fa_attack_falling" : "fa_hit_falling");
+            case 2 -> firstPerson ? "fa_fp_hitcombo2" : "fa_hit_combo2";
+            case 3 -> firstPerson ? "fa_fp_skill3" : "fa_skill3";
+            case 4 -> firstPerson ? (rising ? "fa_fp_jump" : "fa_fp_fall")
+                    : (rising ? "fa_jump" : "fa_fall");
+            default -> "";
+        };
+        Clip clip = CLIPS.get(name);
+        if (clip == null) return base;
+        double time = age;
+        if (skill.skill() == 1) {
+            time = age < preparation ? age * clip.length / preparation : age - preparation;
+        }
+        Pose action = clip.sampleOnce(time);
+        if (skill.skill() == 4) {
+            Clip idle = CLIPS.get(firstPerson ? "fa_fp_idle" : "fa_idle");
+            Pose rest = idle == null ? base : idle.sample(0);
+            for (String bone : new String[]{"body","right_arm","left_arm"}) {
+                action.rotation.put(bone,rest.rotation.getOrDefault(bone,ZERO));
+            }
+            return action;
+        }
+        if (skill.skill() == 3) return action;
+        if (skill.skill() == 2) base.overlayArm(action,"left_arm","left_item");
+        else {
+            base.overlayArm(action,"left_arm","left_item");
+            base.overlayArm(action,"right_arm","right_item");
+        }
+        return base;
+    }
+
+    static void skillLanded(AbstractClientPlayer player) {
+        AIR_MOTION.remove(player);
+        LANDINGS.put(player,player.level().getGameTime());
+        LANDING_WALK.put(player,new LandingMovement(player.getDeltaMovement().horizontalDistance()>.02,
+                player.isSprinting(),player.level().getGameTime()));
+        TOUCHDOWNS.put(player,player.level().getGameTime());
     }
 
     static void cancelHandGesture(AbstractClientPlayer player) {
@@ -180,12 +278,15 @@ public final class AnimationRenderer {
         StyleState state = STATES.get(playerId);
         if (state == null || state.phase().equals("OFF")) {
             LAST.remove(playerId);
+            LANDING_INTERRUPTED.remove(playerId);
+            FREE_ARM_BLENDS.remove(player);
             LEG_CYCLES.remove(player);
             AIR_MOTION.remove(player);
             LANDINGS.remove(player);
             LANDING_WALK.remove(player);
             TOUCHDOWNS.remove(player);
             LANDING_ARMS.remove(player);
+            ENTRY_LANDINGS.remove(player);
             GROUND_Y.remove(player);
             return null;
         }
@@ -194,7 +295,9 @@ public final class AnimationRenderer {
         String phase = state.phase();
         double ageTicks = renderTick - state.phaseStart();
         double age = ageTicks / 20;
-        boolean entry = phase.equals("DRAWING");
+        boolean entry = phase.equals("DRAWING") || phase.equals("UPGRADING");
+        boolean simpleEntry = phase.equals(StyleService.SIMPLE_DRAWING);
+        boolean simpleSheath = phase.equals("SHEATHING") && state.mode() == StyleMode.SIMPLE;
         boolean entering = entry && ageTicks < StyleService.DRAW_TICKS;
         float comboTime = (now - state.comboStart() + partialTick) / 20f;
         String combo = phase.equals("ACTIVE") ? activeComboClip(state, comboTime, "fa_hit_combo") : null;
@@ -203,27 +306,34 @@ public final class AnimationRenderer {
         boolean flying = player.getAbilities().flying;
         boolean airborne = !player.onGround() && !flying;
         AirMotion air = updateAirMotion(player, now);
+        boolean fallingAttack = phase.equals("ACTIVE") && state.fallingAttackStart() >= 0;
+        if (fallingAttack) combo = null;
+        interruptAttacksOnLanding(player, state, renderTick, air);
+        if (new Attack(state.combo(), state.comboStart()).equals(LANDING_INTERRUPTED.get(playerId))) combo = null;
         LegCycle cycle = LEG_CYCLES.computeIfAbsent(player, ignored -> new LegCycle());
         String crouchIdle = wrapCycle(cycle.phase) >= .25 && wrapCycle(cycle.phase) < .75 ? "fa_idle_crouch2" : "fa_idle_crouch";
         double idlePhase = wrapCycle(cycle.phase);
         String standingIdle = idlePhase >= .17 && idlePhase < .55 ? "fa_idle2" : "fa_idle";
         String clip = switch (phase) {
-            case "DRAWING" -> entering ? "fa_enter_mode" : "fa_idle";
-            case "SHEATHING" -> "fa_exit_mode";
+            case "UPGRADING" -> entering ? "fa_enter_mode_common2" : "fa_idle";
+            case StyleService.SIMPLE_DRAWING -> "fa_enter_mode_simple";
+            case "DRAWING" -> entering ? "fa_enter_mode_common" : "fa_idle";
+            case "SHEATHING" -> simpleSheath ? "fa_exit_mode_simple" : "fa_exit_mode";
             case "ACTIVE" -> combo != null
                     ? combo
                     : player.isCrouching() ? (moving ? "fa_walk_crouch" : crouchIdle) : moving ? (player.isSprinting() ? "fa_run" : walkingBackwards(player) ? "fa_walk_back" : "fa_walk") : standingIdle;
             default -> player.isCrouching() ? (moving ? "fa_walk_crouch" : crouchIdle) : null;
         };
         double t = combo == null ? age : comboTime;
-        boolean action = entry || phase.equals("SHEATHING") || combo != null;
+        if (phase.equals("UPGRADING") && entering) t = StyleService.upgradeAnimationSeconds(ageTicks);
+        boolean action = entry || simpleEntry || phase.equals("SHEATHING") || combo != null;
         if (clip == null && flying) clip = "fa_idle";
         if (!action && flying) t = renderTick / 20;
         if ("fa_idle".equals(clip) || "fa_idle2".equals(clip)) {
             if (entry) t = (ageTicks - StyleService.DRAW_TICKS) / 20;
             else if (phase.equals("ACTIVE")) t = (ageTicks + StyleService.ENTRY_TICKS - StyleService.DRAW_TICKS) / 20;
         }
-        boolean once = false;
+        boolean once = simpleEntry || simpleSheath || (phase.equals("UPGRADING") && entering);
         if (!action && air != null) {
             TimedClip airClip = air.animation("fa_", now, partialTick);
             clip = airClip.name;
@@ -245,7 +355,7 @@ public final class AnimationRenderer {
         Clip selected = CLIPS.get(clip);
         if (selected == null) return null;
         Pose legPose = null;
-        if (!entry) {
+        if (!entry && !simpleEntry && !simpleSheath) {
             String gait = player.isCrouching() ? "fa_walk_crouch"
                     : walkingBackwards(player) ? "fa_walk_back" : player.isSprinting() ? "fa_run" : "fa_walk";
             if (landingPlaying && landingAge >= 1.25) gait = player.isSprinting() ? "fa_run" : "fa_walk";
@@ -265,10 +375,47 @@ public final class AnimationRenderer {
         // Hold the last airborne pose during the short re-jump window. Rendering
         // the landing clip at time zero here would still make it flash on screen.
         LandingMovement landingMovement = LANDING_WALK.get(player);
+        boolean baseLanding = air == null && landingAge >= 0 && landingClip != null && landingAge < landingClip.length;
+        if (baseLanding && landingMovement != null) landingMovement.update(speed > .02, now);
         Pose heldPose = LANDING_ARMS.get(player);
-        boolean waitingForJump = landingPlaying && landingMovement != null && landingMovement.waitForJump
+        TimedClip fallingOverlay = phase.equals("ACTIVE") ? fallingAction(state, false, renderTick, fallingAttack) : null;
+        boolean waitingForJump = fallingOverlay == null && landingPlaying && landingMovement != null && landingMovement.waitForJump
                 && renderTick - landing < 2 && heldPose != null;
         Pose pose = once ? selected.sampleOnce(t) : selected.sample(t);
+        // A crouched attack keeps the crouch's torso bend and offset while the
+        // attack supplies its sideways twist. Both clips remain independently timed.
+        if (combo != null && player.isCrouching() && !airborne) {
+            String crouchClipName = moving ? "fa_walk_crouch" : crouchIdle;
+            Clip crouchClip = CLIPS.get(crouchClipName);
+            if (crouchClip != null) {
+                double crouchTime = moving ? wrapCycle(cycle.phase) * crouchClip.length : age;
+                // The attack has priority on Y/Z rotation; crouch owns X and translation.
+                pose.overlayChannels(crouchClip.sample(crouchTime), "body", Pose.X, Pose.ALL, Pose.ALL);
+            }
+        }
+        String landingTorso = null;
+        if (baseLanding && ("fa_hit_combo1".equals(combo) || "fa_hit_combo2".equals(combo))) {
+            landingTorso = landingMovement != null && landingMovement.walking
+                    ? "fa_fall_ground_walk_transition" : "fa_fall_ground";
+            Clip torsoClip = CLIPS.get(landingTorso);
+            if (torsoClip != null) {
+                Pose landingPose = torsoClip.sampleOnce(landingAge);
+                if ("fa_fall_ground_walk_transition".equals(landingTorso) && moving && landingAge >= 1.25) {
+                    Clip gait = CLIPS.get(player.isSprinting() ? "fa_run" : "fa_walk");
+                    if (gait != null) {
+                        Pose gaitPose = gait.sample(wrapCycle(cycle.phase) * gait.length);
+                        float progress = (float)Math.clamp((landingAge - 1.25) / Math.max(.001, torsoClip.length - 1.25), 0, 1);
+                        float eased = progress * progress * (3 - 2 * progress);
+                        float[] from = landingPose.position.getOrDefault("body", ZERO);
+                        float[] to = gaitPose.position.getOrDefault("body", ZERO);
+                        float[] position = from.clone();
+                        position[1] = Mth.lerp(eased, from[1], to[1]);
+                        landingPose.position.put("body", position);
+                    }
+                }
+                pose.overlayChannels(landingPose, "body", Pose.X, Pose.ALL, Pose.ALL);
+            }
+        }
         if (legPose != null) {
             Pose gaitPose = CLIPS.get(LEG_CYCLES.get(player).gait).sample(wrapCycle(LEG_CYCLES.get(player).phase)
                     * CLIPS.get(LEG_CYCLES.get(player).gait).length);
@@ -283,14 +430,36 @@ public final class AnimationRenderer {
                 Pose arms = pose.mix(gaitPose, blend);
                 pose.overlayArm(arms, "right_arm", "right_item");
                 pose.overlayArm(arms, "left_arm", "left_item");
+                if ("fa_fall_ground_walk_transition".equals(clip)) {
+                    float progress = (float)Math.clamp((landingAge - 1.25) / Math.max(.001, selected.length - 1.25), 0, 1);
+                    float eased = progress * progress * (3 - 2 * progress);
+                    float[] landingPosition = pose.position.getOrDefault("body", ZERO);
+                    float[] gaitPosition = gaitPose.position.getOrDefault("body", ZERO);
+                    float[] bodyPosition = landingPosition.clone();
+                    bodyPosition[1] = Mth.lerp(eased, landingPosition[1], gaitPosition[1]);
+                    pose.position.put("body", bodyPosition);
+                }
+            }
+        }
+        if (fallingOverlay != null) {
+            Clip overlayClip = CLIPS.get(fallingOverlay.name);
+            if (overlayClip != null) {
+                Pose overlay = fallingOverlay.once ? overlayClip.sampleOnce(fallingOverlay.time) : overlayClip.sample(fallingOverlay.time);
+                overlayFallingArms(pose, overlay);
             }
         }
         if(phase.equals("ACTIVE")){pose.rotation.remove("head");pose.position.remove("head");}
         if (waitingForJump) pose = heldPose;
         // Blend clip changes briefly. Filtering every frame delays authored gestures
         // and softens stepped keyframes by a different amount at each frame rate.
+        var skill = SkillHud.STATUS.get(playerId);
+        pose = skillPose(pose, skill, renderTick, false);
         Playback previous = LAST.get(playerId);
-        String source = waitingForJump ? "landing_wait" : clip + "|" + (legPose == null ? "" : cycle.gait);
+        String source = waitingForJump ? "landing_wait" : clip + "|" + (legPose == null ? "" : cycle.gait)
+                + (combo != null && player.isCrouching() && !airborne ? "|crouch:" + (moving ? "walk" : crouchIdle) : "")
+                + (landingTorso == null ? "" : "|torso:" + landingTorso)
+                + (fallingOverlay == null ? "" : "|arms:" + fallingOverlay.name + ":" + state.fallingHitStart());
+        if (skill != null && skill.skill() != 0) source += "|skill:" + skill.skill() + ":" + skill.start() + ":" + (renderTick-skill.start()<skill.preparationTicks());
         Pose transitionFrom = null;
         double transitionStart = renderTick;
         if (previous != null
@@ -307,18 +476,88 @@ public final class AnimationRenderer {
             pose = transitionFrom.mix(pose, progress * progress * (3 - 2 * progress));
         }
         Pose landingArms = LANDING_ARMS.get(player);
-        if (landingPlaying && !waitingForJump && landingArms != null && landingAge < .2) {
+        if (fallingOverlay == null && landingPlaying && !waitingForJump && landingArms != null && landingAge < .2) {
             float progress = (float)Math.clamp(landingAge / .2, 0, 1);
             progress = progress * progress * (3 - 2 * progress);
             Pose arms = landingArms.mix(pose, progress);
             pose.overlayArm(arms, "right_arm", "right_item");
             pose.overlayArm(arms, "left_arm", "left_item");
         }
-        if ("fa_hit_combo2".equals(combo)) {
+        FreeArmBlends armBlends = FREE_ARM_BLENDS.computeIfAbsent(player, ignored -> new FreeArmBlends());
+        if ((skill == null || skill.skill() == 0) && ("fa_hit_combo1".equals(combo) || "fa_hit_combo2".equals(combo))) {
+            boolean leftFree = "fa_hit_combo1".equals(combo);
             ArmAttacks attacks = ATTACKS.get(playerId);
-            if (attacks != null && attacks.right != null && attacks.right.combo == 1) {
-                Pose continuingRight = sampleAttack(attacks.right, false, renderTick);
-                if (continuingRight != null) pose.overlayArm(continuingRight, "right_arm", "right_item");
+            Attack continuing = attacks == null ? null : leftFree ? attacks.left : attacks.right;
+            Pose freePose = sampleAttack(continuing, false, renderTick);
+            String freeSource = freePose == null ? null : "attack:" + continuing.combo + ":" + continuing.start;
+            if (freePose == null) {
+                String baseName = player.isCrouching() ? (moving ? "fa_walk_crouch" : crouchIdle)
+                        : moving ? (player.isSprinting() ? "fa_run" : walkingBackwards(player) ? "fa_walk_back" : "fa_walk") : standingIdle;
+                Clip locomotion = CLIPS.get(baseName);
+                double baseTime = moving && locomotion != null ? wrapCycle(cycle.phase) * locomotion.length
+                        : player.isCrouching() ? age : (ageTicks + StyleService.ENTRY_TICKS - StyleService.DRAW_TICKS) / 20;
+                boolean baseOnce = false;
+                if (air != null) {
+                    TimedClip baseAir = air.animation("fa_", now, partialTick);
+                    baseName = baseAir.name;
+                    baseTime = baseAir.time;
+                    baseOnce = baseAir.once;
+                } else if (baseLanding) {
+                    baseName = landingMovement != null && landingMovement.walking
+                            ? "fa_fall_ground_walk_transition" : "fa_fall_ground";
+                    baseTime = landingAge;
+                    baseOnce = true;
+                }
+                Clip baseClip = CLIPS.get(baseName);
+                if (baseClip != null) freePose = baseOnce ? baseClip.sampleOnce(baseTime) : baseClip.sample(baseTime);
+                freeSource = baseName;
+                if (baseLanding && landingMovement != null && landingMovement.waitForJump
+                        && renderTick - landing < 2 && heldPose != null) {
+                    freePose = heldPose;
+                    freeSource = "landing_wait";
+                } else if (baseLanding && freePose != null && heldPose != null && landingAge < .2) {
+                    float progress = (float)Math.clamp(landingAge / .2, 0, 1);
+                    freePose = heldPose.mix(freePose, progress * progress * (3 - 2 * progress));
+                }
+            }
+            if (freePose != null) {
+                String arm = leftFree ? "left_arm" : "right_arm";
+                String item = leftFree ? "left_item" : "right_item";
+                pose.overlayArm(freePose, arm, item);
+                (leftFree ? armBlends.left : armBlends.right).apply(pose, new ArmSource(freeSource, 0), arm, item, renderTick);
+            }
+            (leftFree ? armBlends.right : armBlends.left).capture(pose, leftFree ? "right_arm" : "left_arm", leftFree ? "right_item" : "left_item", renderTick);
+        } else {
+            armBlends.left.capture(pose, "left_arm", "left_item", renderTick);
+            armBlends.right.capture(pose, "right_arm", "right_item", renderTick);
+        }
+        if (entry && airborne && state.entryAirborne() && !ENTRY_LANDINGS.containsKey(player)) {
+            Clip fall = CLIPS.get("fa_fall");
+            Clip fallLoop = CLIPS.get("fa_fall_loop");
+            Pose fallingLegs = fall != null && age < fall.length ? fall.sampleOnce(age)
+                    : fallLoop != null ? fallLoop.sample(Math.max(0, age - (fall == null ? 0 : fall.length))) : null;
+            if (fallingLegs != null) {
+                for (String bone : new String[]{"right_leg", "left_leg"}) {
+                    pose.rotation.remove(bone); pose.position.remove(bone); pose.scale.remove(bone);
+                    pose.overlayChannels(fallingLegs, bone, Pose.ALL, Pose.ALL, Pose.ALL);
+                }
+            }
+        }
+        EntryLanding entryLanding = ENTRY_LANDINGS.get(player);
+        if (entry && entryLanding != null && entryLanding.phaseStart == state.phaseStart()) {
+            Clip ground = CLIPS.get("fa_fall_ground");
+            double elapsed = Math.max(0, (renderTick - entryLanding.tick) / 20);
+            if (ground != null && elapsed < ground.length + .2) {
+                Pose groundPose = ground.sampleOnce(elapsed);
+                float in = (float)Math.clamp(elapsed / .2, 0, 1);
+                float out = (float)Math.clamp((elapsed - ground.length) / .2, 0, 1);
+                in = in * in * (3 - 2 * in);
+                out = out * out * (3 - 2 * out);
+                Pose start = entryLanding.pose == null ? pose : entryLanding.pose;
+                Pose landingPose = start.mix(groundPose, in).mix(pose, out);
+                for (String bone : new String[]{"right_leg", "left_leg"})
+                    pose.overlayChannels(landingPose, bone, Pose.ALL, Pose.ALL, Pose.ALL);
+                pose.overlayChannels(landingPose, "body", 0, Pose.Y, 0);
             }
         }
         LAST.put(playerId, new Playback(clip, source, pose, renderTick, transitionFrom, transitionStart));
@@ -327,6 +566,23 @@ public final class AnimationRenderer {
 
     private static double wrapCycle(double phase) {
         return phase - Math.floor(phase);
+    }
+
+    private static void interruptAttacksOnLanding(AbstractClientPlayer player, StyleState state, double tick, AirMotion air) {
+        Long landing = LANDINGS.get(player);
+        Clip landingClip = CLIPS.get("fa_fall_ground");
+        if (air != null || landing == null || landingClip == null || tick >= landing + 2 + landingClip.length * 20
+                || !state.phase().equals("ACTIVE") || (state.combo() != 1 && state.combo() != 2)
+                || state.comboStart() >= landing + 2) return;
+        UUID id = player.getUUID();
+        LANDING_INTERRUPTED.put(id, new Attack(state.combo(), state.comboStart()));
+        ArmAttacks attacks = ATTACKS.get(id);
+        if (attacks != null) {
+            Attack right = attacks.right != null && attacks.right.combo == 3 ? attacks.right : null;
+            Attack left = attacks.left != null && attacks.left.combo == 3 ? attacks.left : null;
+            if (right == null && left == null) ATTACKS.remove(id);
+            else ATTACKS.put(id, new ArmAttacks(right, left));
+        }
     }
 
     private static final class LegCycle {
@@ -381,7 +637,7 @@ public final class AnimationRenderer {
             AirMotion previous = AIR_MOTION.remove(player);
             if (previous != null && previous.fallStart >= 0 && !player.getAbilities().flying) TOUCHDOWNS.put(player, now);
             if (previous != null && previous.fallStart >= 0 && !player.getAbilities().flying
-                    && previous.highestY - player.getY() >= 1.0 - 1e-3) {
+                    && previous.highestY - player.getY() >= 2.0 - 1e-3) {
                 LANDINGS.put(player, now);
                 double groundSpeed = Math.hypot(player.getX() - player.xo, player.getZ() - player.zo);
                 LANDING_WALK.put(player, new LandingMovement(previous.horizontalSpeed > .02 || groundSpeed > .02,
@@ -394,6 +650,8 @@ public final class AnimationRenderer {
             return null;
         }
         LANDINGS.remove(player);
+        StyleState current = STATES.get(player.getUUID());
+        if (current == null || !current.phase().equals("DRAWING") || current.entryAirborne()) ENTRY_LANDINGS.remove(player);
         LANDING_WALK.remove(player);
         LANDING_ARMS.remove(player);
         Long touchdown = TOUCHDOWNS.remove(player);
@@ -413,7 +671,7 @@ public final class AnimationRenderer {
 
     public static void tickMotion(AbstractClientPlayer player) {
         StyleState state = STATES.get(player.getUUID());
-        if (state != null && state.phase().equals("ACTIVE")) updateAirMotion(player, player.level().getGameTime());
+        if (state != null && (state.phase().equals("ACTIVE") || state.phase().equals("DRAWING"))) updateAirMotion(player, player.level().getGameTime());
         else { AIR_MOTION.remove(player); LANDINGS.remove(player); LANDING_WALK.remove(player); LANDING_ARMS.remove(player); TOUCHDOWNS.remove(player); GROUND_Y.remove(player); }
     }
 
@@ -427,6 +685,30 @@ public final class AnimationRenderer {
     }
 
     private record TimedClip(String name, double time, boolean once) {}
+    private record EntryLanding(long tick, long phaseStart, Pose pose) {}
+    private static void overlayFallingArms(Pose target, Pose overlay) {
+        target.overlayArm(overlay, "right_arm", "right_item");
+        target.overlayArm(overlay, "left_arm", "left_item");
+    }
+
+    private static TimedClip fallingAction(StyleState state, boolean firstPerson, double renderTick, boolean fallingAttack) {
+        if (state.fallingHitStart() >= 0) {
+            String hitName = firstPerson ? "fa_fp_hitfalling" : "fa_hit_falling";
+            Clip hit = CLIPS.get(hitName);
+            if (hit == null) return null;
+            double hitAge = (renderTick - state.fallingHitStart()) / 20;
+            double visualEnd = firstPerson ? Math.min(hit.length, FIRST_PERSON_FALLING_HIT_END_SECONDS) : hit.length;
+            return hitAge >= 0 && hitAge < visualEnd ? new TimedClip(hitName, hitAge, true) : null;
+        }
+        return fallingAttack ? fallingAttackAnimation(firstPerson ? "fa_fp_" : "fa_", renderTick - state.fallingAttackStart()) : null;
+    }
+    private static TimedClip fallingAttackAnimation(String prefix, double elapsedTicks) {
+        String name = prefix + "attack_falling";
+        Clip intro = CLIPS.get(name);
+        double age = Math.max(0, elapsedTicks / 20);
+        if (intro != null && age < intro.length) return new TimedClip(name, age, true);
+        return new TimedClip(name + "_loop", age - (intro == null ? 0 : intro.length), false);
+    }
     private static final class LandingMovement {
         private boolean walking;
         private boolean candidate;
@@ -448,6 +730,11 @@ public final class AnimationRenderer {
     private record Attack(int combo, long start) {}
     private record ArmAttacks(Attack right, Attack left) {}
     private record ArmSource(String clip, long start) {}
+
+    private static final class FreeArmBlends {
+        private final HandBlend right = new HandBlend();
+        private final HandBlend left = new HandBlend();
+    }
 
     private static final class FirstPersonBlend {
         private final HandBlend right = new HandBlend();
@@ -495,18 +782,32 @@ public final class AnimationRenderer {
         private Pose previous;
         private Pose from;
         private double started;
+        private double duration = FIRST_PERSON_TRANSITION_TICKS;
         private double lastTick;
+
+        private void capture(Pose pose, String arm, String item, double tick) {
+            previous = new Pose(new HashMap<>(), new HashMap<>(), new HashMap<>());
+            previous.overlayArm(pose, arm, item);
+            source = null;
+            from = null;
+            lastTick = tick;
+        }
 
         private void apply(Pose pose, ArmSource target, String arm, String item, double tick) {
             if (previous == null || tick < lastTick || tick - lastTick > FIRST_PERSON_TRANSITION_TICKS) {
                 from = null;
             } else if (!target.equals(source)) {
-                from = previous;
+                // A new attack on this hand starts at its authored pose, even if its previous attack is unfinished.
+                from = source != null && source.clip.startsWith("fa_fp_hitcombo")
+                        && target.clip.startsWith("fa_fp_hitcombo") && source.start != target.start
+                        ? null : previous;
                 started = tick;
+                duration = target.clip.equals("fa_fp_attack_falling")
+                        ? FIRST_PERSON_FALLING_ENTRY_TICKS : FIRST_PERSON_TRANSITION_TICKS;
             }
             Pose hand = new Pose(new HashMap<>(), new HashMap<>(), new HashMap<>());
             hand.overlayArm(pose, arm, item);
-            double progress = (tick - started) / FIRST_PERSON_TRANSITION_TICKS;
+            double progress = (tick - started) / duration;
             if (from != null && progress < 1) {
                 float eased = (float)(progress * progress * (3 - 2 * progress));
                 hand = from.mix(hand, eased);
@@ -720,8 +1021,30 @@ public final class AnimationRenderer {
         }
     }
     record Pose(Map<String,float[]> rotation,Map<String,float[]> position,Map<String,float[]> scale) {
+        static final int X = 1, Y = 2, Z = 4, ALL = X | Y | Z;
+
+        void overlayChannels(Pose source, String bone, int rotationAxes, int positionAxes, int scaleAxes) {
+            overlayAxes(rotation, source.rotation, bone, rotationAxes, ZERO);
+            overlayAxes(position, source.position, bone, positionAxes, ZERO);
+            overlayAxes(scale, source.scale, bone, scaleAxes, ONE);
+        }
+
+        private static void overlayAxes(Map<String,float[]> target, Map<String,float[]> source,
+                                        String bone, int axes, float[] defaultValue) {
+            float[] incoming = source.get(bone);
+            if (incoming == null || axes == 0) return;
+            if (axes == ALL) {
+                target.put(bone, incoming);
+                return;
+            }
+            float[] current = target.getOrDefault(bone, defaultValue);
+            float[] combined = current.clone();
+            for (int axis = 0; axis < 3; axis++) if ((axes & (1 << axis)) != 0) combined[axis] = incoming[axis];
+            target.put(bone, combined);
+        }
+
         void overlayArm(Pose source, String arm, String item) {
-            for (String bone : new String[]{arm, item}) {
+            for (String bone : new String[]{arm, item, item + "2"}) {
                 if (source.rotation.containsKey(bone)) rotation.put(bone, source.rotation.get(bone));
                 if (source.position.containsKey(bone)) position.put(bone, source.position.get(bone));
                 if (source.scale.containsKey(bone)) scale.put(bone, source.scale.get(bone));

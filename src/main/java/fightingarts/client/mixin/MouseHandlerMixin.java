@@ -17,7 +17,7 @@ abstract class MouseHandlerMixin {
 
     @Inject(method = "turnPlayer", at = @At("HEAD"), cancellable = true)
     private void fightingarts$lockTurn(double frameTime, CallbackInfo ci) {
-        if (StyleClient.isCinematic()) {
+        if (StyleClient.isCinematic() || fightingarts.client.SkillHud.aimLocked()) {
             smoothTurnX.reset();
             smoothTurnY.reset();
             ci.cancel();

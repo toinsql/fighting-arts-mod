@@ -6,6 +6,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.blaze3d.vertex.PoseStack;
 import fightingarts.StyleState;
+import fightingarts.StyleMode;
+import fightingarts.StyleService;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
@@ -33,28 +35,111 @@ public final class FirstPersonStyleRenderer {
     private static final float CAMERA_SIDE_INSET = 1.25f;
     private static final Map<String, Group> GROUPS = new HashMap<>();
     private static boolean loaded;
+    private static final double[] idleBladeLength = new double[2];
     private FirstPersonStyleRenderer() {}
+
+    public static boolean ownsHands() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return false;
+        StyleState state = AnimationRenderer.STATES.get(mc.player.getUUID());
+        return state != null && !state.phase().equals("OFF") && state.swords().size() >= 3;
+    }
 
     public static void render(RenderHandEvent event, CallbackInfoReturnable<Boolean> result) {
         Minecraft mc = Minecraft.getInstance();
         AbstractClientPlayer player = mc.player;
-        if (player == null) return;
+        if (mc.level != null) {
+            StyleState style = StyleClient.local();
+            double now = mc.level.getGameTime() + (double) event.getPartialTick();
+            if (AttackHotbar.loweringVanillaHand(style, now) || AttackHotbar.vanillaHandOffset(style, now) > 0) {
+                result.setReturnValue(false);
+                return;
+            }
+        }
+        if (!ownsHands()) return;
         StyleState state = AnimationRenderer.STATES.get(player.getUUID());
-        if (state == null || state.swords().size() < 3 || state.phase().equals("OFF")) return;
 
         result.setReturnValue(true);
         if (event.getHand() != InteractionHand.MAIN_HAND) return;
         if (!(mc.getEntityRenderDispatcher().getRenderer(player) instanceof PlayerRenderer renderer)) return;
 
+        loadRig();
         AnimationRenderer.Pose firstPersonPose = AnimationRenderer.sampleFirstPersonPose(player, state, event.getPartialTick());
         if (firstPersonPose == null) AnimationRenderer.updateFirstPerson(player, event.getPartialTick());
         PlayerModel<?> model = renderer.getModel();
-        loadRig();
-        ItemStack transfer = state.phase().equals("SHEATHING") ? state.swords().get(2) : ItemStack.EMPTY;
+        ItemStack transfer = state.phase().equals("SHEATHING") && state.mode() == StyleMode.COMMON
+                ? state.swords().get(2) : state.phase().equals("UPGRADING") ? state.swords().get(0) : ItemStack.EMPTY;
+        double spin = SwordModel.spinAge(player, event.getPartialTick());
+        double upgradeTime = StyleService.upgradeAnimationSeconds(player.level().getGameTime() - state.phaseStart()
+                + (double) event.getPartialTick());
+        ItemStack rightSword = state.swords().get(state.phase().equals("UPGRADING") && upgradeTime >= 1.29167
+                && upgradeTime < 1.66667 ? 2 : 0);
         renderArmAndSword(player, model, HumanoidArm.LEFT, "left_item", "espada_left_item_AJUSTE",
-                state.swords().get(1), transfer, event, firstPersonPose);
+                spin >= 0 ? ItemStack.EMPTY : state.swords().get(1), transfer, event, firstPersonPose);
         renderArmAndSword(player, model, HumanoidArm.RIGHT, "right_item", "espada_right_item_AJUSTE",
-                state.swords().get(0), ItemStack.EMPTY, event, firstPersonPose);
+                spin >= 0 ? ItemStack.EMPTY : rightSword, ItemStack.EMPTY, event, firstPersonPose);
+        if (spin >= 0 && firstPersonPose != null) {
+            var pose = event.getPoseStack();
+            var right = gripCenter(player, firstPersonPose, false);
+            var left = gripCenter(player, firstPersonPose, true);
+            // Center between the visible grips even if one hand is closer to the camera.
+            float depth = right.z + left.z;
+            float midpoint = depth < -.01f ? Math.clamp(right.z / depth, 0f, 1f) : .5f;
+            var center = right.lerp(left, midpoint);
+            float scale = (float) (projectedIdleBladeLength(player) * Math.max(.08, -center.z) / SwordModel.GUARD_TO_TIP);
+            pose.pushPose();
+            pose.translate(center.x, center.y, center.z);
+            pose.scale(scale, scale, scale);
+            SwordModel.renderSpin(pose, event.getMultiBufferSource(), event.getPackedLight(),
+                    player, state.swords(), true, spin);
+            pose.popPose();
+        }
+    }
+
+    private static double projectedIdleBladeLength(AbstractClientPlayer player) {
+        int model = SwordModel.slimHandOffset(player, true) == 0 ? 0 : 1;
+        if (idleBladeLength[model] > 0) return idleBladeLength[model];
+        var idle = AnimationRenderer.firstPersonIdlePose();
+        double fallback = SwordModel.GUARD_TO_TIP * 2 / 1.45;
+        if (idle == null) return fallback;
+        double total = 0;
+        for (String side : new String[]{"right", "left"}) {
+            String arm = side + "_arm", item = side + "_item";
+            String adjustment = "espada_" + item + "_AJUSTE";
+            if (!GROUPS.containsKey(arm) || !GROUPS.containsKey(item) || !GROUPS.containsKey(adjustment)) return fallback;
+            var pose = new PoseStack();
+            applyCameraBone(pose, arm, idle.transform(arm));
+            placeCameraSword(pose, player, arm, item, adjustment, idle.transform(item));
+            float guard = SwordModel.GUARD_COORDINATE * SwordModel.ITEM_SCALE;
+            float tip = SwordModel.TIP_COORDINATE * SwordModel.ITEM_SCALE;
+            var matrix = pose.last().pose();
+            var a = matrix.transformPosition(new org.joml.Vector3f(guard, guard, 0));
+            var b = matrix.transformPosition(new org.joml.Vector3f(tip, tip, 0));
+            if (a.z >= -.05 || b.z >= -.05) return fallback;
+            total += Math.hypot(a.x / -a.z - b.x / -b.z, a.y / -a.z - b.y / -b.z);
+        }
+        return idleBladeLength[model] = total / 2;
+    }
+
+    private static org.joml.Vector3f gripCenter(AbstractClientPlayer player, AnimationRenderer.Pose animation, boolean left) {
+        String arm = left ? "left_arm" : "right_arm";
+        PoseStack local = new PoseStack();
+        applyCameraBone(local, arm, animation.transform(arm));
+        // Hand center in the detached arm mesh, measured from the shoulder pivot.
+        float x = ((left ? 1 : -1) - SwordModel.slimHandOffset(player, left)) / 16f;
+        return local.last().pose().transformPosition(new org.joml.Vector3f(x, -8f / 16, 0));
+    }
+
+    public static double vanillaHandOffset(float partialTick) {
+        var mc = Minecraft.getInstance();
+        if (mc.level == null) return 0;
+        return AttackHotbar.vanillaHandOffset(StyleClient.local(), mc.level.getGameTime() + (double) partialTick);
+    }
+
+    public static boolean loweringVanillaHand(float partialTick) {
+        var mc = Minecraft.getInstance();
+        return mc.level != null
+                && AttackHotbar.loweringVanillaHand(StyleClient.local(), mc.level.getGameTime() + (double) partialTick);
     }
 
     private static void renderArmAndSword(AbstractClientPlayer player, PlayerModel<?> model,
@@ -108,14 +193,27 @@ public final class FirstPersonStyleRenderer {
         pose.popPose();
     }
 
+    static void positionFallingArms(AnimationRenderer.Pose pose) {
+        // Apply camera clearance before blending so it moves with the animated hands.
+        for (String arm : new String[]{"left_arm", "right_arm"}) {
+            Group bone = GROUPS.get(arm);
+            if (bone == null) continue;
+            float[] animation = pose.transform(arm);
+            float side = Math.signum(bone.origin[0]);
+            float baseX = bone.origin[0] - CAMERA_ORIGIN[0] - side * CAMERA_SIDE_INSET;
+            float x = side * Math.max(3.5f, (baseX + animation[0]) * side) - baseX;
+            pose.position().put(arm, new float[]{x, animation[1], animation[2] - 4});
+        }
+    }
+
     private static void applyCameraBone(PoseStack pose, String boneName, float[] animation) {
         Group bone = GROUPS.get(boneName);
         if (bone == null) return;
-        pose.translate((bone.origin[0] + animation[0] - CAMERA_ORIGIN[0]) / 16.0,
+        float side = Math.signum(bone.origin[0]);
+        float x = bone.origin[0] + animation[0] - CAMERA_ORIGIN[0] - side * CAMERA_SIDE_INSET;
+        pose.translate(x / 16.0,
                 (bone.origin[1] + animation[1] - CAMERA_ORIGIN[1]) / 16.0,
-                (bone.origin[2] + animation[2] - CAMERA_ORIGIN[2]) / 16.0);
-        float side = Math.signum(bone.origin[0] + animation[0]);
-        pose.translate(-side * CAMERA_SIDE_INSET / 16.0, 0, CAMERA_ARM_DEPTH / 16.0);
+                (bone.origin[2] + animation[2] - CAMERA_ORIGIN[2] + CAMERA_ARM_DEPTH) / 16.0);
         rotateCamera(pose, new float[]{bone.rotation[0] + animation[3],
                 bone.rotation[1] + animation[4], bone.rotation[2] + animation[5]});
         pose.scale(animation[6], animation[7], animation[8]);
@@ -125,17 +223,23 @@ public final class FirstPersonStyleRenderer {
                                                 AbstractClientPlayer player, ItemStack sword, String armBone,
                                                 String itemBone, String adjustment, float[] animation) {
         Group arm = GROUPS.get(armBone), item = GROUPS.get(itemBone), adjust = GROUPS.get(adjustment);
-        if (arm == null || item == null || adjust == null || hidden(animation)) return;
+        if (sword.isEmpty() || arm == null || item == null || adjust == null || hidden(animation)) return;
         pose.pushPose();
-        translateCamera(pose, add(sub(item.origin, arm.origin), new float[]{animation[0], animation[1], animation[2]}));
+        placeCameraSword(pose, player, armBone, itemBone, adjustment, animation);
+        SwordModel.render(pose, buffers, light, player, sword, true);
+        pose.popPose();
+    }
+
+    private static void placeCameraSword(PoseStack pose, AbstractClientPlayer player, String armBone,
+                                         String itemBone, String adjustment, float[] animation) {
+        Group arm = GROUPS.get(armBone), item = GROUPS.get(itemBone), adjust = GROUPS.get(adjustment);
+        translateCamera(pose, add(sub(item.origin, arm.origin), new float[]{animation[0] + SwordModel.slimHandOffset(player, armBone.equals("left_arm")), animation[1], animation[2]}));
         rotateCamera(pose, new float[]{item.rotation[0] + animation[3],
                 item.rotation[1] + animation[4], item.rotation[2] + animation[5]});
         pose.scale(animation[6], animation[7], animation[8]);
         translateCamera(pose, sub(adjust.origin, item.origin));
         float zAlignment = armBone.equals("left_arm") ? 20.0f : -20.0f;
         rotateCamera(pose, new float[]{adjust.rotation[0], adjust.rotation[1], adjust.rotation[2] + zAlignment});
-        SwordModel.render(pose, buffers, light, player, sword, true);
-        pose.popPose();
     }
 
     private static void loadRig() {
@@ -162,7 +266,7 @@ public final class FirstPersonStyleRenderer {
         if (arm == null || item == null || adjust == null || hidden(animation)) return;
         pose.pushPose();
         float[] offset = sub(item.origin, arm.origin);
-        offset[0] += animation[0]; offset[1] += animation[1]; offset[2] += animation[2];
+        offset[0] += animation[0] + SwordModel.slimHandOffset(player, armBone.equals("left_arm")); offset[1] += animation[1]; offset[2] += animation[2];
         translate(pose, offset);
         rotate(pose, new float[]{item.rotation[0] + animation[3], item.rotation[1] + animation[4], item.rotation[2] + animation[5]});
         pose.scale(animation[6], animation[7], animation[8]);

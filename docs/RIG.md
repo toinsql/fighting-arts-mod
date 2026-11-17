@@ -2,7 +2,7 @@
 
 Source: `santoryu_cespada.bbmodel` (15 named groups, 348 cubes, one embedded 256x128 texture). Exporter: `tools/export-santoryu.js`.
 
-The animation JSON is `assets/fightingarts/animations/santoryu.json`, with 14 source clips exported as `fa_<name>`, `fa_<name>_upper`, and `fa_<name>_legs` (42 tracks total). `walk_left` and `walk_right` are omitted. `torso` is mapped to the renderer's `body`. Blockbench keyframe time is retained in seconds; only channels with source keyframes are written. Model positions stay XYZ because Punchy applies model `x += x`, `y -= y`, `z += z`. Item renderer conversion is a separate step: Punchy HeldItemAnimation translates `(-x, -z, +y) / 16`.
+The animation JSON is `assets/fightingarts/animations/santoryu.json`. Its 47 source clips are exported as `fa_<name>`, `fa_<name>_upper`, and `fa_<name>_legs` for a total of 141 tracks. `torso` is mapped to the renderer's `body`. Keyframe times use seconds, and the export includes channels with source keyframes. Model positions use XYZ because Punchy applies model `x += x`, `y -= y`, `z += z`. Punchy's HeldItemAnimation translates item coordinates by `(-x, -z, +y) / 16`.
 
 The rig JSON is `assets/fightingarts/styles/santoryu_rig.json`. It retains the nested group hierarchy and each group's origin/rotation. Cube `from` / `to` and `origin` are Blockbench model units (16 per block); face UVs are preserved. Groups without children remain in the metadata because item adjustment groups are useful attachment transforms.
 
@@ -19,4 +19,4 @@ Each `sword_attachments` entry has `modelBone` and `adjustment`. The cube tree h
 
 The source texture is extracted to `assets/fightingarts/textures/entity/steve_e_espada_minecraft.png`.
 
-Validation: exporter syntax checked; reran export; parsed both JSON outputs; confirmed 14 clips/42 masks, walk legs contain both legs, no left/right walking clips, 15 groups, 348 cubes, four adjustment attachments, and the referenced texture exists. The exact in-game alignment still depends on the client rendering this hierarchy with the documented Minecraft model matrix. A running Minecraft preview is needed to visually tune the final transform.
+Run `node tools/verify-assets.js` to check the exported clip durations and masks, along with the rig groups, cubes, sword attachments, and texture.

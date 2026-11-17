@@ -12,6 +12,9 @@ description='''Extensible combat styles with custom player animations.'''
 [[mixins]]
 config="fightingarts.mixins.json"
 
+[[mixins]]
+config="fightingarts.combat.mixins.json"
+
 [[dependencies.fightingarts]]
 modId="neoforge"
 type="required"

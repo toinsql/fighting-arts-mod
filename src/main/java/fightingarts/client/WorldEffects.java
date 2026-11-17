@@ -41,7 +41,7 @@ final class WorldEffects {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.player == null) return;
         StyleState state = AnimationRenderer.STATES.get(mc.player.getUUID());
-        if (state == null || !(state.phase().equals("DRAWING") || state.phase().equals("ACTIVE"))) return;
+        if (state == null || !(StyleClient.isCinematic() || state.phase().equals("ACTIVE"))) return;
 
         PoseStack pose = event.getPoseStack();
         Camera camera = event.getCamera();
