@@ -8,7 +8,9 @@
     "InventoryMenuMixin",
     "CreativeWeaponSlotPacketMixin",
     "StunnedMovementMixin",
-    "CombatDropMixin"
+    "CombatDropMixin",
+    "StunnedMobMixin",
+    "StunnedCreeperMixin"
   ],
   "injectors": {
     "defaultRequire": 1

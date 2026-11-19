@@ -44,6 +44,10 @@ final class VisualCheck {
                     var impactField=fightingarts.client.SkillImpact.class.getDeclaredField("impactTick");impactField.setAccessible(true);
                     double impactAge=MC.level.getGameTime()+event.getPartialTick().getGameTimeDeltaPartialTick(false)-impactField.getDouble(null);
                     if(impactAge>=0 && impactAge<1.5)captureOnce("vendaval-triple-slash");
+                    if(impactAge>=1.5 && impactAge<2.5)captureOnce("slash-animated-early");
+                    if(impactAge>=6 && impactAge<7)captureOnce("slash-animated-middle");
+                    if(impactAge>=15 && impactAge<16)captureOnce("slash-animated-late");
+                    if(impactAge>=22 && impactAge<23)captureOnce("slash-animated-fade");
                 }catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
             }
             if (capture == null) return;
@@ -289,11 +293,55 @@ final class VisualCheck {
             require(!fightingarts.client.StyleClient.attackMode(),"missing sword exits mode");
             captureOnce("cancelled-skill-restores-hud");
         }
-        if(tick==1230){System.out.println("FA-REVIEW PASS");MC.stop();}
+        if(tick==1240)server(p->{
+            p.getInventory().setItem(8,new ItemStack(Items.BOW));p.getInventory().selected=8;
+            p.startUsingItem(net.minecraft.world.InteractionHand.MAIN_HAND);
+            require(p.isUsingItem(),"bow begins charging before stun");
+            SantoryuSkills.clientStun(p);
+            require(!p.isUsingItem(),"stun cancels existing bow charge");
+            p.startUsingItem(net.minecraft.world.InteractionHand.MAIN_HAND);
+            require(!p.isUsingItem(),"stun blocks new bow charge");
+            stunVictim=cow(p,p.getX(),p.getZ()+1);
+            stunZombie=EntityType.ZOMBIE.create(p.level());stunZombie.setPos(p.position().add(1,0,0));p.level().addFreshEntity(stunZombie);
+            SantoryuSkills.clientStun(stunZombie);
+            require(!stunZombie.doHurtTarget(stunVictim),"stunned mob cannot melee");
+            float health=stunVictim.getHealth();
+            stunVictim.hurt(p.damageSources().mobAttack(stunZombie),10);
+            require(stunVictim.getHealth()==health,"stunned attacker cannot deal damage");
+            p.attack(stunVictim);
+            require(stunVictim.getHealth()==health,"stunned player cannot deal damage");
+            stunCreeper=EntityType.CREEPER.create(p.level());stunCreeper.setPos(p.position().add(4,0,0));p.level().addFreshEntity(stunCreeper);
+            stunCreeper.ignite();
+            try{var fuse=net.minecraft.world.entity.monster.Creeper.class.getDeclaredField("swell");fuse.setAccessible(true);fuse.setInt(stunCreeper,29);}
+            catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
+            SantoryuSkills.clientStun(stunCreeper);
+        });
+        if(tick==1255)server(p->{
+            require(stunCreeper.isAlive(),"primed creeper cannot explode during stun");
+            try{var fuse=net.minecraft.world.entity.monster.Creeper.class.getDeclaredField("swell");fuse.setAccessible(true);require(fuse.getInt(stunCreeper)==0,"creeper fuse stays reset during stun");}
+            catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
+            p.startUsingItem(net.minecraft.world.InteractionHand.MAIN_HAND);
+            require(!p.isUsingItem(),"bow cannot charge midway through stun");
+        });
+        if(tick==1275)server(p->{
+            require(!SantoryuSkills.stunned(p),"stun expired normally");
+            p.startUsingItem(net.minecraft.world.InteractionHand.MAIN_HAND);
+            require(p.isUsingItem(),"bow can charge after stun");p.stopUsingItem();
+            try{var fuse=net.minecraft.world.entity.monster.Creeper.class.getDeclaredField("swell");fuse.setAccessible(true);int fuseAge=fuse.getInt(stunCreeper);require(fuseAge>0 && fuseAge<15,"creeper starts a fresh fuse after stun");}
+            catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
+            stunVictim.invulnerableTime=0;float health=stunVictim.getHealth();
+            stunVictim.hurt(p.damageSources().mobAttack(stunZombie),1);
+            require(stunVictim.getHealth()<health,"mob damage restored after stun");
+            stunCreeper.discard();stunZombie.discard();
+            System.out.println("FA-STUN PASS player and mob damage, bow interruption, creeper fuse and recovery");
+        });
+        if(tick==1290){System.out.println("FA-REVIEW PASS");MC.stop();}
     }
     static net.minecraft.world.phys.Vec3 expected;
     static double maxY=100,lowApex=100;
-    static Cow airborne;
+    static Cow airborne,stunVictim;
+    static net.minecraft.world.entity.monster.Zombie stunZombie;
+    static net.minecraft.world.entity.monster.Creeper stunCreeper;
     static boolean airAttackSent;
     static boolean seenAir;
     static long landedAt=-1;

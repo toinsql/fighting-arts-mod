@@ -59,7 +59,7 @@ final class SkillEffects {
         for (Timed timed : EFFECTS) {
             double age = (MC.level.getGameTime() + partial - timed.start) / 20;
             if (timed.effect.kind() == 3 && timed.effect.target() == MC.player.getId() && age >= 0 && age < 1.20) {
-                tripleSlash(graphics, age);
+                ScreenSlashes.render(graphics, age);
             }
             if (timed.effect.kind() != 6 || timed.effect.target() != MC.player.getId() || age >= .36) continue;
             var pose = graphics.pose();
@@ -74,26 +74,6 @@ final class SkillEffects {
             graphics.setColor(1, 1, 1, 1);
             pose.popPose();
         }
-    }
-
-    private static void tripleSlash(GuiGraphics graphics, double age) {
-        // Brief full-strength contact, followed by a fast fade shared by all three blades.
-        float alpha = (float) Math.pow(1 - Math.clamp((age - 1) / .20, 0, 1), 1.6);
-        int width = (int) Math.ceil(Math.hypot(graphics.guiWidth(), graphics.guiHeight()) * 1.06);
-        int height = Math.max(24, (int)(graphics.guiHeight() * .16));
-        float[] angles = {-27, 27, -3};
-        RenderSystem.enableBlend();
-        for (int blade = 0; blade < 3; blade++) {
-            var pose = graphics.pose();
-            pose.pushPose();
-            pose.translate(graphics.guiWidth() * .5, graphics.guiHeight() * (.47 + blade * .025), 0);
-            pose.mulPose(Axis.ZP.rotationDegrees(angles[blade]));
-            graphics.setColor(1, 1, 1, alpha);
-            graphics.blit(SkillMesh.VIOLET,
-                    -width / 2, -height / 2, width, height, 0, 0, 128, 32, 128, 32);
-            pose.popPose();
-        }
-        graphics.setColor(1, 1, 1, 1);
     }
 
     static void render(RenderLevelStageEvent event) {

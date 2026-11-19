@@ -100,6 +100,7 @@ public final class SantoryuSkills {
         return true;
     }
     public static void clientStun(LivingEntity entity) {
+        entity.stopUsingItem();
         STUNS.put(entity,new Stun(entity.position(),entity.level().getGameTime()+30));
     }
     public static boolean busy(ServerPlayer p){return combat(p).skill!=0 || stunned(p);}
@@ -288,6 +289,7 @@ public final class SantoryuSkills {
             AABB box = target.getBoundingBox();
             if (!insideMoonSlash(eye, direction, reach, box) || !visible(player, eye, target)
                     || !hurtWithSkill(player, combat, target, damage, false)) continue;
+            target.stopUsingItem();
             STUNS.put(target, new Stun(target.position(), target.level().getGameTime() + 30));
             Vec3 center = box.getCenter();
             Vec3 incoming = center.subtract(eye).multiply(1, 0, 1).normalize();
@@ -407,6 +409,7 @@ public final class SantoryuSkills {
         Stun stun=STUNS.get(living);
         if(stun==null)return;
         if(!living.isAlive() || living.isRemoved() || living.level().getGameTime()>=stun.until){STUNS.remove(living);return;}
+        living.stopUsingItem();
         living.setDeltaMovement(Vec3.ZERO);
         if(living instanceof ServerPlayer p)p.connection.teleport(stun.anchor.x,stun.anchor.y,stun.anchor.z,p.getYRot(),p.getXRot());
         else {living.setPos(stun.anchor);if(living instanceof Mob mob)mob.getNavigation().stop();}

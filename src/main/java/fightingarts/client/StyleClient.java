@@ -57,6 +57,7 @@ public final class StyleClient {
    if (MC.screen == null && attackMode()) e.setCanceled(true);
   });
   NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.client.event.InputEvent.InteractionKeyMappingTriggered e)->{
+   if (MC.player!=null && SantoryuSkills.stunned(MC.player)) {e.setSwingHand(false);e.setCanceled(true);return;}
    if(!e.isAttack())return;
    boolean leapHit=SkillHud.local()!=null && SkillHud.local().skill()==4 && MC.player!=null && !MC.player.onGround();
    if(SkillHud.local()!=null && SkillHud.local().skill()!=0 && !leapHit){e.setSwingHand(false);e.setCanceled(true);return;}
