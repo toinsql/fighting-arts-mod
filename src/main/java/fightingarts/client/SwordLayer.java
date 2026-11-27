@@ -15,6 +15,8 @@ import net.minecraft.client.renderer.entity.RenderLayerParent;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.client.renderer.entity.player.PlayerRenderer;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.EntityRenderersEvent;
@@ -69,7 +71,7 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
         if(s.phase().equals("SHEATHING") && s.mode() == StyleMode.SIMPLE) {
             drawWaist(pose, buffers, light, p, s.swords(), "SIMPLE_SHEATHING", t);
         }
-        if(s.phase().equals("SHEATHING") && s.mode() == StyleMode.COMMON){
+        if(s.phase().equals("SHEATHING") && s.mode().hasSkills()){
             drawWaist(pose,buffers,light,p,s.swords(),s.phase(),t);
             if(t<.41667)drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
             if(t<.58333)drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
@@ -81,7 +83,19 @@ public final class SwordLayer extends RenderLayer<AbstractClientPlayer, PlayerMo
         if (spin >= 0) {
             SwordModel.renderSpin(pose, buffers, light, p, s.swords(), false, spin);
         } else {
-            drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
+            var consumption = s.phase().equals("ACTIVE") ? ConsumableClient.frame(p, partial) : null;
+            if (consumption != null && consumption.draw() > .5f) {
+                pose.pushPose();
+                getParentModel().translateToHand(HumanoidArm.LEFT, pose);
+                pose.mulPose(Axis.XP.rotationDegrees(-90));
+                pose.mulPose(Axis.YP.rotationDegrees(180));
+                pose.translate(-1 / 16f, .125f, -.625f);
+                Minecraft.getInstance().gameRenderer.itemInHandRenderer.renderItem(p, consumption.stack(),
+                        ItemDisplayContext.THIRD_PERSON_LEFT_HAND, true, pose, buffers, light);
+                pose.popPose();
+            } else {
+                drawSword(pose,buffers,light,p,partial,"left_main",getParentModel().leftArm,transform(p,"left_item"),s.swords().get(1),1);
+            }
             drawSword(pose,buffers,light,p,partial,"right_main",getParentModel().rightArm,transform(p,"right_item"),s.swords().get(0),0);
         }
         if (s.mode() == StyleMode.SIMPLE) {

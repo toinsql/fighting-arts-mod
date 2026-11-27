@@ -1,10 +1,14 @@
 package fightingarts.client;
 
 import fightingarts.FightingArts;
+import fightingarts.SantoryuSkills;
+import fightingarts.StyleDefense;
+import fightingarts.StyleMode;
 import fightingarts.StyleService;
 import fightingarts.StyleState;
 import java.util.Set;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;
 import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
@@ -15,7 +19,6 @@ final class AttackHotbar {
             ResourceLocation.fromNamespaceAndPath(FightingArts.MOD_ID, "textures/gui/style_symbol.png");
     static final int SLIDE_TICKS = 7;
     private static final int SLIDE_DISTANCE = 70;
-    private static final int SYMBOL_SIZE = 1254;
     private static final Set<ResourceLocation> STATUS_LAYERS = Set.of(
             VanillaGuiLayers.PLAYER_HEALTH, VanillaGuiLayers.ARMOR_LEVEL,
             VanillaGuiLayers.FOOD_LEVEL, VanillaGuiLayers.AIR_LEVEL, VanillaGuiLayers.VEHICLE_HEALTH,
@@ -89,10 +92,42 @@ final class AttackHotbar {
         graphics.pose().translate(0, offset, 0);
         SkillHud.sprite(graphics, 4, x - 82, y - 13, 84, 44);
         SkillHud.sprite(graphics, 5, x + 16, y - 13, 84, 44);
-        if (state.mode() == fightingarts.StyleMode.COMMON && !phase.equals("UPGRADING")) SkillHud.sprite(graphics, 6, x - 3, y - 43, 24, 54);
+        if (state.mode().hasSkills() && !phase.equals("UPGRADING")) SkillHud.sprite(graphics, 6, x - 3, y - 43, 24, 54);
+        if (state.mode() == StyleMode.AWAKENED) AwakeningEffects.hotbar(graphics, x, y, now);
         graphics.blitSprite(SLOT, x, y, 18, 18);
-        graphics.blit(SYMBOL, x + 2, y + 2, 14, 14, 0, 0, SYMBOL_SIZE, SYMBOL_SIZE, SYMBOL_SIZE, SYMBOL_SIZE);
+        graphics.blit(SYMBOL, x + 2, y + 2, 14, 14, 0, 0, 1254, 1254, 1254, 1254);
+        var status = SkillHud.local();
+        if (state.mode() == StyleMode.SIMPLE && status != null) {
+            drawGuardCharges(graphics, x, y - 3, now, status);
+            if (phase.equals("ACTIVE")) drawLeap(graphics, x + 100, y + 2, now, status);
+        }
         graphics.pose().popPose();
+    }
+
+    private static void drawGuardCharges(GuiGraphics graphics, int x, int y, double now, SantoryuSkills.Status status) {
+        for (int i = 0; i < SantoryuSkills.SIMPLE_CHARGES; i++) {
+            int left = x + i * 4;
+            graphics.fill(left, y, left + 2, y + 2, 0xff221e29);
+            double remaining = status.guardReady(i) - now;
+            if (remaining <= 0) {
+                graphics.fill(left, y, left + 2, y + 1, 0xffe0f8dc);
+                graphics.fill(left, y + 1, left + 2, y + 2, 0xff53ae80);
+            } else {
+                int shade = (int)(42 * Math.clamp(1 - remaining / StyleDefense.CHARGE_COOLDOWN_TICKS, 0, 1));
+                graphics.fill(left, y + 1, left + 2, y + 2, 0xff4a3851 + shade * 0x010101);
+            }
+        }
+    }
+
+    private static void drawLeap(GuiGraphics graphics, int x, int y, double now, SantoryuSkills.Status status) {
+        boolean available = SkillHud.simpleLeapReady(status, now);
+        float tint = available ? 1 : .52f;
+        graphics.setColor(tint, tint, tint, 1);
+        SkillHud.skillIcon(graphics, 3, x, y, 14, 14);
+        graphics.setColor(1, 1, 1, 1);
+        var mc = Minecraft.getInstance();
+        graphics.drawString(mc.font, mc.options.keyHotbarSlots[3].getTranslatedKeyMessage(), x + 16, y + 4,
+                available ? 0xfff3d394 : 0xff948478);
     }
 
     private static double offset(StyleState state, double now) {
@@ -101,7 +136,7 @@ final class AttackHotbar {
         }
         double phaseProgress = (now - state.phaseStart()) / SLIDE_TICKS;
         return switch (state.phase()) {
-            case "DRAWING", "UPGRADING" -> SLIDE_DISTANCE * ease(phaseProgress);
+            case "DRAWING", "UPGRADING", StyleService.AWAKENING -> SLIDE_DISTANCE * ease(phaseProgress);
             case "SHEATHING" -> sheathOffset + (SLIDE_DISTANCE - sheathOffset) * ease(phaseProgress);
             case StyleService.SIMPLE_DRAWING -> now < attackRise
                     ? SLIDE_DISTANCE * ease(phaseProgress)

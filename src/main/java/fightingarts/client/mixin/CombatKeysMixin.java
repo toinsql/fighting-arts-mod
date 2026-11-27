@@ -13,4 +13,9 @@ abstract class CombatKeysMixin {
     private void fightingarts$combatKeys(CallbackInfo ci) {
         StyleClient.handleCombatKeys();
     }
+
+    @Inject(method = "startUseItem", at = @At("HEAD"), cancellable = true)
+    private void fightingarts$reserveUseForGuard(CallbackInfo ci) {
+        if (StyleClient.attackMode()) ci.cancel();
+    }
 }

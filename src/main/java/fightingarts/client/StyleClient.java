@@ -14,14 +14,25 @@ import org.lwjgl.glfw.GLFW;
 public final class StyleClient {
  private static final Minecraft MC=Minecraft.getInstance();
  private static final KeyMapping TOGGLE=new KeyMapping("key.fightingarts.toggle",GLFW.GLFW_KEY_X,"Fighting Arts");
+ private static final KeyMapping AWAKEN=new KeyMapping("key.fightingarts.awaken",GLFW.GLFW_KEY_V,"Fighting Arts");
  private static EntryCamera entryCamera;
  private static long entryImpactTick = Long.MIN_VALUE;
  public static void install(IEventBus bus){
   try {Class<?> api=Class.forName("punchymoves.api.client.AnimationIntent"),kind=Class.forName("punchymoves.api.client.AnimationIntent$Kind");java.util.function.Function<Object,Object> reader=p->{StyleState s=AnimationRenderer.STATES.get(((net.minecraft.world.entity.Entity)p).getUUID());String name=s!=null&&!s.phase().equals("OFF")?"SPECIAL_ACTION":"UNSPECIFIED";for(Object k:kind.getEnumConstants())if(k.toString().equals(name))return k;return null;};api.getMethod("register",java.util.function.Function.class).invoke(null,reader);}catch(ReflectiveOperationException ignored){}
   bus.addListener((RegisterKeyMappingsEvent e)->e.register(TOGGLE));
+  bus.addListener((RegisterKeyMappingsEvent e)->e.register(AWAKEN));
   bus.addListener(SwordLayer::register);
   bus.addListener((EntityRenderersEvent.AddLayers event)->MoonMarkLayer.register(event));
+  bus.addListener(BlindSight::registerShader);
   SkillHud.install();
+  StyleNetwork.clientJumpReceiver=AnimationRenderer::remoteJump;
+  CombatRestrictions.clientAttackMode=player->{
+   var state=AnimationRenderer.STATES.get(player.getUUID());
+   return state!=null && !state.phase().equals("OFF");
+  };
+  DefenseClient.install();
+  ConsumableClient.install();
+  AwakeningEffects.install(bus);
   StyleNetwork.clientDamageReceiver = DamageNumbers::add;
   StyleNetwork.clientDashReceiver = impulse -> {
    if (MC.player != null) MC.player.setDeltaMovement(impulse.x(), MC.player.getDeltaMovement().y, impulse.z());
@@ -32,12 +43,14 @@ public final class StyleClient {
    if (MC.level != null && MC.level.getPlayerByUUID(s.playerId()) instanceof net.minecraft.client.player.AbstractClientPlayer player)
     AnimationRenderer.entryStateChanged(player, old, s);
    AnimationRenderer.recordAttack(old,s);
+   DefenseClient.stateChanged(s);
    WorldEffects.stateChanged(s);
    if (MC.player != null && s.playerId().equals(MC.player.getUUID())) {
+    if (MC.options.getCameraType().isFirstPerson()) AnimationRenderer.recordFirstPersonAttack(MC.player, old, s);
     AttackHotbar.stateChanged(old, s);
-    if (s.phase().equals("DRAWING") || s.phase().equals("UPGRADING")) {
+    if (s.phase().equals(StyleService.AWAKENING) || s.phase().equals("DRAWING") || s.phase().equals("UPGRADING")) {
      startEntryCamera();
-     entryImpactTick = s.phaseStart() + StyleService.DRAW_TICKS;
+     entryImpactTick = s.phase().equals(StyleService.AWAKENING) ? Long.MIN_VALUE : s.phaseStart() + StyleService.DRAW_TICKS;
     } else {
      restore();
      if (s.phase().equals("OFF") || s.phase().equals(StyleService.SIMPLE_DRAWING)) entryImpactTick = Long.MIN_VALUE;
@@ -50,15 +63,13 @@ public final class StyleClient {
   NeoForge.EVENT_BUS.addListener(StyleClient::removeSheathingZoom);
   NeoForge.EVENT_BUS.addListener(WeaponSlotsHud::render);
   NeoForge.EVENT_BUS.addListener(AttackHotbar::render);
-  NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.RightClickBlock event)->{
-   if(event.getEntity()==MC.player && attackMode())event.setUseItem(net.neoforged.neoforge.common.util.TriState.FALSE);
-  });
   NeoForge.EVENT_BUS.addListener((InputEvent.MouseScrollingEvent e) -> {
    if (MC.screen == null && attackMode()) e.setCanceled(true);
   });
   NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.client.event.InputEvent.InteractionKeyMappingTriggered e)->{
    if (MC.player!=null && SantoryuSkills.stunned(MC.player)) {e.setSwingHand(false);e.setCanceled(true);return;}
    if(!e.isAttack())return;
+   if(SkillHud.sightActive() || DefenseClient.localGuarding()){e.setSwingHand(false);e.setCanceled(true);return;}
    boolean leapHit=SkillHud.local()!=null && SkillHud.local().skill()==4 && MC.player!=null && !MC.player.onGround();
    if(SkillHud.local()!=null && SkillHud.local().skill()!=0 && !leapHit){e.setSwingHand(false);e.setCanceled(true);return;}
    if (leapHit && !(MC.hitResult instanceof net.minecraft.world.phys.EntityHitResult)) {
@@ -76,11 +87,16 @@ public final class StyleClient {
  }
  public static StyleState local(){return MC.player==null?null:AnimationRenderer.STATES.get(MC.player.getUUID());}
  private static void tick(net.neoforged.neoforge.client.event.ClientTickEvent.Post e){
-  if(MC.level==null){restore();AttackHotbar.reset();entryImpactTick=Long.MIN_VALUE;AnimationRenderer.STATES.clear();AnimationRenderer.clearAttacks();DamageNumbers.clear();return;}
+  DefenseClient.tick();
+  ConsumableClient.tick();
+  if(MC.level==null){restore();AwakeningEffects.clear();AttackHotbar.reset();entryImpactTick=Long.MIN_VALUE;AnimationRenderer.STATES.clear();AnimationRenderer.clearAttacks();DamageNumbers.clear();return;}
   StyleState s=local(); boolean drawing=isCinematic();
   if(MC.player!=null) AnimationRenderer.tickMotion(MC.player);
   if(MC.player!=null&&(s==null||!s.phase().equals("ACTIVE")||!MC.options.getCameraType().isFirstPerson())) AnimationRenderer.cancelHandGesture(MC.player);
-  if(MC.player!=null&&(s==null||s.phase().equals("OFF")||!MC.options.getCameraType().isFirstPerson())) AnimationRenderer.resetHandBlend(MC.player);
+  if(MC.player!=null&&(s==null||s.phase().equals("OFF")||!MC.options.getCameraType().isFirstPerson())) {
+   AnimationRenderer.resetHandBlend(MC.player);
+   AnimationRenderer.clearFirstPersonStrikes(MC.player);
+  }
   if(drawing){
    startEntryCamera();
    if (entryCamera != null) {
@@ -100,6 +116,7 @@ public final class StyleClient {
   if (MC.player == null || MC.player.isSpectator()) return;
   boolean active = attackMode();
   if (active) {
+   DefenseClient.tick();
    SkillHud.keys();
    discardClicks(MC.options.keyDrop);
    discardClicks(MC.options.keyPickItem);
@@ -116,6 +133,7 @@ public final class StyleClient {
   while (TOGGLE.consumeClick()) {
    if (active || MC.player.getOffhandItem().isEmpty()) StyleNetwork.requestToggle(StyleMode.COMMON);
   }
+  while (AWAKEN.consumeClick()) StyleNetwork.requestToggle(StyleMode.AWAKENED);
  }
 
  private static void discardClicks(KeyMapping key) {
@@ -126,10 +144,22 @@ public final class StyleClient {
 
  public static boolean isCinematic() {
   StyleState state = local();
-  return MC.level != null && state != null && (state.phase().equals("DRAWING") || state.phase().equals("UPGRADING"));
+  return MC.level != null && state != null && (state.phase().equals(StyleService.AWAKENING) || state.phase().equals("DRAWING") || state.phase().equals("UPGRADING"));
  }
 
  private static void lockMovement(MovementInputUpdateEvent event) {
+  if(event.getEntity()==MC.player && SkillHud.autoRunning()){
+   var input=event.getInput();
+   input.up=true;input.down=input.left=input.right=input.jumping=input.shiftKeyDown=false;
+   input.forwardImpulse=1;input.leftImpulse=0;
+   MC.player.setSprinting(true);
+   if(!MC.player.onGround()){
+    var forward=net.minecraft.world.phys.Vec3.directionFromRotation(0,MC.player.getYRot());
+    double speed=SkillHud.local().visionStart()>=0?.275:.55;
+    MC.player.setDeltaMovement(forward.scale(speed).add(0,MC.player.getDeltaMovement().y,0));
+   }
+   return;
+  }
   if (event.getEntity() != MC.player || !(isCinematic() || SkillHud.movementLocked() || local()!=null && local().phase().equals("UPGRADING"))) return;
   var input = event.getInput();
   input.forwardImpulse = input.leftImpulse = 0;
@@ -163,6 +193,17 @@ public final class StyleClient {
  public static double[] camera(float partialTick) {
   if (!isCinematic() || entryCamera == null || MC.getCameraEntity() != MC.player) return null;
   double elapsed = MC.level.getGameTime() - local().phaseStart() + (double)partialTick;
+  if (local().phase().equals(StyleService.AWAKENING)) {
+   double[] pose = AwakeningEffects.camera(entryCamera.heading, MC.player.getPosition(partialTick), elapsed / 20);
+   Vec3 target = MC.player.getPosition(partialTick).add(0,1.1,0);
+   var hit = MC.level.clip(new net.minecraft.world.level.ClipContext(target, new Vec3(pose[0],pose[1],pose[2]),
+           net.minecraft.world.level.ClipContext.Block.VISUAL,net.minecraft.world.level.ClipContext.Fluid.NONE,MC.player));
+   if (hit.getType()!=net.minecraft.world.phys.HitResult.Type.MISS) {
+    Vec3 safe = hit.getLocation().add(target.subtract(hit.getLocation()).normalize().scale(.2));
+    pose[0]=safe.x;pose[1]=safe.y;pose[2]=safe.z;
+   }
+   return pose;
+  }
   return entryCamera.pose(elapsed, MC.player.getPosition(partialTick));
  }
 
@@ -234,13 +275,16 @@ public final class StyleClient {
   }
   if(showTitle){
    float alpha=(float)Math.clamp((35-impactAge)/10,0,1);
-   int size=Math.min(h/3,112),cx=w/2,cy=h/2;
+   int size=titleSize(g),cx=w/2,top=titleTop(g);
    g.setColor(1,1,1,alpha);
-   image(g,"style_symbol",cx-size/2,cy-size-12,size);
+   g.blit(ResourceLocation.fromNamespaceAndPath("fightingarts","textures/gui/style_symbol.png"),
+           cx-size/2,top,size,size,0,0,1254,1254,1254,1254);
    g.setColor(1,1,1,1);
    int color=((int)(alpha*255)<<24)|0xffe8c5;
-   if(alpha>0)g.drawCenteredString(MC.font,Component.literal("§lEstilo Três Espadas"),cx,cy+18,color);
+   if(alpha>0)g.drawCenteredString(MC.font,Component.literal("§lEstilo Três Espadas"),cx,top+size+4,color);
   }
+  AwakeningEffects.title(g, partialTick);
  }
- private static void image(GuiGraphics g,String name,int x,int y,int size){g.blit(ResourceLocation.fromNamespaceAndPath("fightingarts","textures/gui/"+name+".png"),x,y,0,0,size,size,size,size);}
+ static int titleSize(GuiGraphics graphics) { return Math.min(graphics.guiHeight() / 6, 72); }
+ static int titleTop(GuiGraphics graphics) { return graphics.guiHeight() / 10 + 12; }
 }

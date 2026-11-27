@@ -84,7 +84,7 @@ final class WorldEffects {
             float r = radius + (i % 4) * 0.035f;
             float x = (float)Math.cos(a) * r, z = (float)Math.sin(a) * r;
             float size = 0.045f + (i % 3) * 0.014f;
-            billboard(pose, out, x, y, z, size, size * 1.4f, (i % 2 == 0 ? 0xff67ff : 0x38ff9b), fade,cameraRotation);
+            billboard(pose, out, x, y, z, size, size * 1.4f, (i % 2 == 0 ? 0x98dc68 : 0x38ff9b), fade,cameraRotation);
         }
     }
 
@@ -129,7 +129,7 @@ final class WorldEffects {
     private static Vector3f toPlayerAxes(Vector3f world,float inverseYaw){world.rotateY(inverseYaw);return world.mul(-1,-1,1);}
     private static Vector3f toWorldAxes(Vector3f local,float yaw){return new Vector3f(local).mul(-1,-1,1).rotateY(yaw).add(0,-.95f,0);}
     private static void quadTrail(PoseStack.Pose matrix,VertexConsumer out,Vector3f a,Vector3f b,Vector3f c,Vector3f d,int sword,float alpha){
-        float r=sword==1?1f:1f,g=sword==2?.78f:.94f,bcol=1f;int packed=Math.max(0,Math.min(255,(int)(245*alpha)));
+        float r=sword==1?.75f:.9f,g=1f,bcol=sword==2?.7f:.88f;int packed=Math.max(0,Math.min(255,(int)(245*alpha)));
         trailVertex(matrix,out,a,r,g,bcol,packed,0,1);trailVertex(matrix,out,b,r,g,bcol,packed,0,0);trailVertex(matrix,out,c,r,g,bcol,packed,1,0);trailVertex(matrix,out,d,r,g,bcol,packed,1,1);
     }
     private static void trailVertex(PoseStack.Pose matrix,VertexConsumer out,Vector3f p,float r,float g,float b,int alpha,float u,float v){out.addVertex(matrix,p.x,p.y,p.z).setColor(r,g,b,alpha/255f).setUv(u,v).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(matrix,0,1,0);}

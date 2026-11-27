@@ -1,6 +1,7 @@
 package fightingarts.mixin;
 
 import fightingarts.SantoryuSkills;
+import fightingarts.StyleDefense;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.GoalSelector;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
@@ -26,6 +27,7 @@ abstract class StunnedMobMixin {
 
     @Inject(method="doHurtTarget",at=@At("HEAD"),cancellable=true)
     private void fightingarts$preventAttack(net.minecraft.world.entity.Entity target,CallbackInfoReturnable<Boolean> callback) {
-        if (SantoryuSkills.stunned((Mob)(Object)this)) callback.setReturnValue(false);
+        Mob mob = (Mob)(Object)this;
+        if (SantoryuSkills.stunned(mob) || StyleDefense.disarmed(mob)) callback.setReturnValue(false);
     }
 }

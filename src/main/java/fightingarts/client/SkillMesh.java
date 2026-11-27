@@ -11,9 +11,12 @@ import net.minecraft.world.phys.Vec3;
 /** Textured strips with shared edges, smooth bends and per-point width and opacity. */
 final class SkillMesh {
     static final ResourceLocation EMERALD = texture("lightning_emerald");
-    static final ResourceLocation VIOLET = texture("lightning_violet");
+    static final ResourceLocation LIME = texture("lightning_lime");
     static final ResourceLocation FISSURE = texture("moon_fissure");
     static final ResourceLocation WIND = texture("sword_wind");
+    static final ResourceLocation SLASH_WAKE = texture("slash_wake");
+    static final ResourceLocation SLASH_EDGE = texture("slash_edge");
+    static final ResourceLocation SPIN_SPARK = texture("spin_spark");
     static final ResourceLocation AIM = texture("aim_ribbon");
 
     private SkillMesh() {}

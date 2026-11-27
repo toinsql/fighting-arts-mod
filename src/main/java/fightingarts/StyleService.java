@@ -31,6 +31,16 @@ import java.util.*;
 public final class StyleService {
     public static final int DRAW_TICKS = 65;
     public static final int ENTRY_TICKS = DRAW_TICKS + 30;
+    public static final String AWAKENING = "AWAKENING";
+    public static final int AWAKEN_ANIMATION_TICKS = 90; // Authored enter_mode_full: 4.5 s.
+    public static final int AWAKEN_ENTRY_TICKS = AWAKEN_ANIMATION_TICKS + 40;
+    public static final int AWAKENED_TICKS = 5 * 60 * 20;
+    public static final int AWAKEN_IMPACT_TICKS = 60;
+    public static final double AWAKEN_RADIUS = 20;
+    public static final double AWAKEN_VIEW_RADIUS = 30;
+    public static float awakeningDamage(double distance) {
+        return (float)(16 - 14 * Math.clamp(distance / AWAKEN_RADIUS, 0, 1));
+    }
     public static double upgradeAnimationSeconds(double elapsedTicks) {
         return elapsedTicks * 53 / (20.0 * DRAW_TICKS);
     }
@@ -55,6 +65,8 @@ public final class StyleService {
     private static final double FALLING_DASH_MIN_TRAIL_SPEED = 0.10;
     private static final double FALLING_DASH_DRAG = 0.91;
     private static final Map<UUID, MutableState> STATES = new HashMap<>();
+    private static final String SAVED_MODE = "fightingarts_active_mode";
+    private static final String SAVED_AWAKENING_TIME = "fightingarts_awakened_ticks";
     private static final Map<UUID, List<ItemStack>> OFF_SWORDS = new HashMap<>();
     public static final ResourceLocation SHEATH_SLOW = ResourceLocation.fromNamespaceAndPath(FightingArts.MOD_ID, "sheathing_slow");
     private StyleService() {}
@@ -64,11 +76,31 @@ public final class StyleService {
         return state == null ? null : snapshot(player.getUUID(), state);
     }
 
+    static boolean inAttackMode(ServerPlayer player) { return STATES.containsKey(player.getUUID()); }
+
+    static boolean canRaiseGuard(ServerPlayer player) {
+        MutableState state = STATES.get(player.getUUID());
+        return state != null && state.phase.equals("ACTIVE") && player.isAlive() && !player.isSpectator()
+                && player.getOffhandItem().isEmpty() && !locked(state, player.level().getGameTime())
+                && !SantoryuSkills.busy(player);
+    }
+
     public static void toggle(ServerPlayer player, StyleMode mode) {
         if (mode == StyleMode.NONE || SantoryuSkills.busy(player)) return;
         boolean simple = mode == StyleMode.SIMPLE;
         MutableState state = STATES.get(player.getUUID());
         long now = player.serverLevel().getGameTime();
+        if (mode == StyleMode.AWAKENED) {
+            if (state == null || state.mode != StyleMode.COMMON || !state.phase.equals("ACTIVE")
+                    || !player.isAlive() || player.isSpectator() || !player.onGround() || player.isPassenger()
+                    || !player.getOffhandItem().isEmpty() || findSwords(player).size() != 3
+                    || locked(state, now) || !SantoryuSkills.consumeAwakening(player)) return;
+            state = new MutableState(StyleMode.AWAKENED, AWAKENING, now, findSwords(player), player.position(), false);
+            STATES.put(player.getUUID(), state);
+            player.stopUsingItem();
+            sync(player, state);
+            return;
+        }
         if (state == null || state.phase.equals("OFF")) {
             if (!player.isAlive() || player.isSpectator() || !player.getOffhandItem().isEmpty()
                     || (simple && !player.getMainHandItem().isEmpty())) return;
@@ -83,7 +115,7 @@ public final class StyleService {
                 && player.getOffhandItem().isEmpty() && !SantoryuSkills.busy(player)) {
             state = new MutableState(mode, "UPGRADING", now, findSwords(player), player.position(), false);
             STATES.put(player.getUUID(), state);
-        } else if (state.mode == mode && (state.phase.equals("ACTIVE") || state.phase.equals(SIMPLE_DRAWING))) {
+        } else if ((state.mode == mode || state.mode == StyleMode.AWAKENED) && (state.phase.equals("ACTIVE") || state.phase.equals(SIMPLE_DRAWING))) {
             state.phase = "SHEATHING";
             state.fallingAttackStart = -1;
             state.fallingHitStart = -1;
@@ -105,7 +137,8 @@ public final class StyleService {
         long now = player.serverLevel().getGameTime();
         boolean leapHit = SantoryuSkills.leapStrike(player, target);
         if (s == null || !s.phase.equals("ACTIVE") || locked(s, now)
-                || (SantoryuSkills.busy(player) && !leapHit)) return;
+                || StyleDefense.guarding(player) || StyleDefense.disarmed(player)
+                || SantoryuSkills.visionActive(player) || (SantoryuSkills.busy(player) && !leapHit)) return;
         if (leapHit) {
             SantoryuSkills.interruptLeap(player);
             s.leapHitTarget = target;
@@ -130,6 +163,13 @@ public final class StyleService {
         s.comboStart = now;
         SantoryuSkills.normalSweep(player, s.combo, target);
         sync(player, s);
+    }
+
+    static void rushSwing(ServerPlayer player,int combo){
+        var state=STATES.get(player.getUUID());
+        if(state==null)return;
+        state.combo=combo;state.comboStart=player.level().getGameTime();
+        sync(player,state);
     }
 
     private static boolean canUseFallingAttack(ServerPlayer player, MutableState state, long now) {
@@ -365,7 +405,7 @@ public final class StyleService {
     }
 
     public static boolean isAttackLocked(String phase, int combo, long ticksSinceCombo) {
-        if (phase.equals("UPGRADING") || phase.equals("DRAWING") || phase.equals(SIMPLE_DRAWING) || phase.equals("SHEATHING")) return true;
+        if (phase.equals(AWAKENING) || phase.equals("UPGRADING") || phase.equals("DRAWING") || phase.equals(SIMPLE_DRAWING) || phase.equals("SHEATHING")) return true;
         if (!phase.equals("ACTIVE")) return false;
         return switch (combo) {
             case 1, 2 -> ticksSinceCombo < COMBO12_LOCK_TICKS;
@@ -378,11 +418,76 @@ public final class StyleService {
         return StyleWeapons.of(p).swords();
     }
 
-    private static void sync(ServerPlayer p, MutableState s) { StyleNetwork.broadcast(p, snapshot(p.getUUID(), s)); }
+    private static void sync(ServerPlayer p, MutableState s) {
+        saveMode(p, s);
+        StyleNetwork.broadcast(p, snapshot(p.getUUID(), s));
+    }
     private static StyleState snapshot(UUID id, MutableState s) {
         boolean entryAirborne = s.phase.equals("DRAWING") && s.airborneEntry && !s.entryLanded;
         return new StyleState(id, s.phase, s.phaseStart, s.combo, s.comboStart, s.swords, s.fallingAttackStart,
-                s.fallingHitStart, entryAirborne, s.mode);
+                s.fallingHitStart, entryAirborne, s.mode, s.awakeningEndsAt);
+    }
+
+    private static void saveMode(ServerPlayer player, MutableState state) {
+        var data = player.getPersistentData();
+        if (state == null || state.phase.equals("SHEATHING")) {
+            data.remove(SAVED_MODE);
+            data.remove(SAVED_AWAKENING_TIME);
+            return;
+        }
+        data.putString(SAVED_MODE, state.mode.name());
+        if (state.mode == StyleMode.AWAKENED) data.putInt(SAVED_AWAKENING_TIME, remainingAwakening(player, state));
+        else data.remove(SAVED_AWAKENING_TIME);
+    }
+
+    private static int remainingAwakening(ServerPlayer player, MutableState state) {
+        return state.awakeningEndsAt < 0 ? AWAKENED_TICKS
+                : (int)Math.clamp(state.awakeningEndsAt - player.level().getGameTime(), 0, AWAKENED_TICKS);
+    }
+
+    private static void restoreMode(ServerPlayer player) {
+        var data = player.getPersistentData();
+        StyleMode mode = switch (data.getString(SAVED_MODE)) {
+            case "SIMPLE" -> StyleMode.SIMPLE;
+            case "COMMON" -> StyleMode.COMMON;
+            case "AWAKENED" -> StyleMode.AWAKENED;
+            default -> StyleMode.NONE;
+        };
+        if (mode == StyleMode.NONE) return;
+        List<ItemStack> swords = findSwords(player);
+        if (swords.size() < StyleWeapons.SANTORYU_SLOTS || !player.getOffhandItem().isEmpty()
+                || !player.isAlive() || player.isSpectator()) {
+            saveMode(player, null);
+            return;
+        }
+        int remaining = Math.clamp(data.getInt(SAVED_AWAKENING_TIME), 0, AWAKENED_TICKS);
+        if (mode == StyleMode.AWAKENED && remaining == 0) mode = StyleMode.COMMON;
+        long now = player.level().getGameTime();
+        var state = new MutableState(mode, "ACTIVE", now, swords, player.position(), false);
+        state.lastY = state.fallTopY = player.getY();
+        if (mode == StyleMode.AWAKENED) state.awakeningEndsAt = now + remaining;
+        STATES.put(player.getUUID(), state);
+        sync(player, state);
+    }
+
+    private static void expireAwakening(ServerPlayer player, MutableState state) {
+        state.mode = StyleMode.COMMON;
+        state.awakeningEndsAt = -1;
+        SantoryuSkills.endAwakening(player);
+        sync(player, state);
+        ServerLevel level = player.serverLevel();
+        level.sendParticles(net.minecraft.core.particles.ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                player.getX(), player.getY() + .7, player.getZ(), 22, .48, .48, .48, .04);
+        level.sendParticles(net.minecraft.core.particles.ParticleTypes.POOF,
+                player.getX(), player.getY() + .3, player.getZ(), 16, .55, .24, .55, .06);
+    }
+
+    @SubscribeEvent public static void jump(net.neoforged.neoforge.event.entity.living.LivingEvent.LivingJumpEvent event){
+        if(!(event.getEntity() instanceof ServerPlayer player))return;
+        var state=STATES.get(player.getUUID());
+        if(state==null || !state.phase.equals("ACTIVE"))return;
+        state.rightLeading=!state.rightLeading;
+        StyleNetwork.broadcastJump(player,state.rightLeading);
     }
 
     @SubscribeEvent public static void tick(PlayerTickEvent.Post event) {
@@ -396,17 +501,20 @@ public final class StyleService {
             return;
         }
         long now = p.serverLevel().getGameTime();
+        if (p.isSwimming()) p.setSwimming(false);
         List<ItemStack> currentSwords = findSwords(p);
         int sheathTicks = s.mode == StyleMode.SIMPLE ? SIMPLE_SHEATH_TICKS : SHEATH_TICKS;
         if (currentSwords.size() < StyleWeapons.SANTORYU_SLOTS || !p.getOffhandItem().isEmpty()
-                || p.isSpectator() || (s.phase.equals("SHEATHING") && now - s.phaseStart >= sheathTicks)) {
+                || !p.isAlive() || p.isSpectator() || (s.phase.equals("SHEATHING") && now - s.phaseStart >= sheathTicks)) {
             STATES.remove(p.getUUID());
+            saveMode(p, null);
             removeSlow(p);
             OFF_SWORDS.put(p.getUUID(), currentSwords);
             StyleNetwork.broadcast(p, new StyleState(p.getUUID(), "OFF", now, 0, 0, currentSwords));
             return;
         }
         if (s.phase.equals("ACTIVE")) {
+            if (s.mode == StyleMode.AWAKENED && now >= s.awakeningEndsAt) expireAwakening(p, s);
             if (!sameLists(s.swords, currentSwords)) {
                 s.swords = currentSwords;
                 sync(p, s);
@@ -415,15 +523,23 @@ public final class StyleService {
             updateDashSweep(p, s);
         }
         long age = now - s.phaseStart;
+        if (s.phase.equals(AWAKENING)) {
+            p.teleportTo(s.anchor.x, s.anchor.y, s.anchor.z);
+            p.setDeltaMovement(Vec3.ZERO);
+            p.fallDistance = 0;
+            if (age >= AWAKEN_IMPACT_TICKS && age <= AWAKEN_IMPACT_TICKS + 16) awakeningWave(p, s, age);
+        }
         if (((s.phase.equals("DRAWING") || s.phase.equals("UPGRADING")) && age >= ENTRY_TICKS)
+                || (s.phase.equals(AWAKENING) && age >= AWAKEN_ENTRY_TICKS)
                 || (s.phase.equals(SIMPLE_DRAWING) && age >= SIMPLE_ENTRY_TICKS)) {
             s.swords = currentSwords;
             s.phase = "ACTIVE";
             s.phaseStart = now;
+            if (s.mode == StyleMode.AWAKENED) s.awakeningEndsAt = now + AWAKENED_TICKS;
             s.lastY = s.fallTopY = p.getY();
             sync(p,s);
         }
-        if (s.phase.equals("DRAWING") || s.phase.equals("UPGRADING")) {
+        if (s.phase.equals("DRAWING")) {
             if (s.airborneEntry) {
                 if (!s.entryLanded && p.onGround()) {
                     s.entryLanded = true;
@@ -433,6 +549,23 @@ public final class StyleService {
                 p.setDeltaMovement(0, movement.y, 0);
             } else {
                 p.teleportTo(s.anchor.x, s.anchor.y, s.anchor.z); p.setDeltaMovement(Vec3.ZERO); p.hurtMarked = true;
+            }
+        }
+    }
+
+    private static void awakeningWave(ServerPlayer player, MutableState state, long age) {
+        double radius = AWAKEN_RADIUS * Math.clamp((age - AWAKEN_IMPACT_TICKS) / 16.0, 0, 1);
+        AABB area = new AABB(state.anchor, state.anchor).inflate(radius, 4, radius);
+        for (var target : player.serverLevel().getEntitiesOfClass(net.minecraft.world.entity.LivingEntity.class, area,
+                e -> e != player && e.isAlive() && !e.isSpectator() && !player.isAlliedTo(e))) {
+            double distance = target.position().distanceTo(state.anchor);
+            if (distance > radius || state.awakeningHit.contains(target.getUUID())
+                    || target instanceof Player other && !player.canHarmPlayer(other)) continue;
+            state.awakeningHit.add(target.getUUID());
+            if (target.hurt(player.damageSources().playerAttack(player), awakeningDamage(distance))) {
+                Vec3 push = target.position().subtract(state.anchor).multiply(1, 0, 1).normalize();
+                target.push(push.x * .35, .12, push.z * .35);
+                StyleNetwork.sendDamageNumber(player, target.getBoundingBox().getCenter(), awakeningDamage(distance));
             }
         }
     }
@@ -477,7 +610,10 @@ public final class StyleService {
     }
 
     @SubscribeEvent public static void login(PlayerEvent.PlayerLoggedInEvent e) {
-        if (e.getEntity() instanceof ServerPlayer p) syncExisting(p);
+        if (e.getEntity() instanceof ServerPlayer p) {
+            restoreMode(p);
+            syncExisting(p);
+        }
     }
     @SubscribeEvent public static void tracking(PlayerEvent.StartTracking e) {
         if (e.getEntity() instanceof ServerPlayer watcher && e.getTarget() instanceof ServerPlayer tracked) {
@@ -486,11 +622,22 @@ public final class StyleService {
         }
     }
     @SubscribeEvent public static void logout(PlayerEvent.PlayerLoggedOutEvent e) {
-        if(e.getEntity() instanceof ServerPlayer p) { STATES.remove(p.getUUID()); OFF_SWORDS.remove(p.getUUID()); removeSlow(p); StyleNetwork.broadcast(p,new StyleState(p.getUUID(),"OFF",p.serverLevel().getGameTime(),0,0,findSwords(p))); }
+        if (e.getEntity() instanceof ServerPlayer p) {
+            saveMode(p, STATES.remove(p.getUUID()));
+            OFF_SWORDS.remove(p.getUUID());
+            removeSlow(p);
+        }
+    }
+    @SubscribeEvent public static void dimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            MutableState state = STATES.get(player.getUUID());
+            if (state != null && state.phase.equals("ACTIVE")) sync(player, state);
+        }
     }
     @SubscribeEvent public static void death(net.neoforged.neoforge.event.entity.living.LivingDeathEvent e) {
         if (e.getEntity() instanceof ServerPlayer p) {
             STATES.remove(p.getUUID());
+            saveMode(p, null);
             OFF_SWORDS.remove(p.getUUID());
             removeSlow(p);
             StyleNetwork.broadcast(p, new StyleState(p.getUUID(), "OFF", p.serverLevel().getGameTime(), 0, 0, List.of()));
@@ -524,13 +671,15 @@ public final class StyleService {
         StyleMode mode;
         String phase; long phaseStart, comboStart; int combo; List<ItemStack> swords; final Vec3 anchor; final boolean airborneEntry;
         long fallingAttackStart = -1, fallingHitStart = -1, fallingLandingExpiry = -1;
+        long awakeningEndsAt = -1;
         double lastY, fallTopY;
         boolean fallingAttackUsed;
         Entity fallingHitTarget, leapHitTarget;
         long leapHitTick = -1;
         DashSweep dashSweep;
         Entity dashDamageTarget;
-        boolean entryLanded;
+        boolean entryLanded, rightLeading;
+        final Set<UUID> awakeningHit = new HashSet<>();
         MutableState(StyleMode mode, String phase, long start, List<ItemStack> swords, Vec3 anchor, boolean airborneEntry) {
             this.mode = mode;
             this.phase = phase;

@@ -10,7 +10,11 @@
     "StunnedMovementMixin",
     "CombatDropMixin",
     "StunnedMobMixin",
-    "StunnedCreeperMixin"
+    "StunnedCreeperMixin",
+    "RushJumpMixin",
+    "CombatSwimmingMixin",
+    "CombatWaterPlayerMixin",
+    "CombatWaterVisualMixin"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -17,7 +17,9 @@ public final class FightingArts {
         SantoryuSkills.register(modBus);
         NeoForge.EVENT_BUS.register(SantoryuSkills.class);
         NeoForge.EVENT_BUS.register(StyleService.class);
+        NeoForge.EVENT_BUS.register(StyleDefense.class);
         NeoForge.EVENT_BUS.register(CombatRestrictions.class);
+        NeoForge.EVENT_BUS.register(CombatConsumables.class);
         NeoForge.EVENT_BUS.register(StyleWeapons.class);
         if (FMLEnvironment.dist == Dist.CLIENT) ClientHooks.install(modBus);
     }

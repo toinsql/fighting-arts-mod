@@ -16,8 +16,12 @@ abstract class MinecraftAttackMixin {
 
     @Inject(method="startAttack",at=@At("HEAD"),cancellable=true)
     private void fightingarts$blockClick(CallbackInfoReturnable<Boolean> callback) {
+        if(fightingarts.client.SkillHud.sightActive()){callback.setReturnValue(false);return;}
         Minecraft mc=(Minecraft)(Object)this;
-        if(!StyleClient.attackMode() || !(mc.hitResult instanceof BlockHitResult hit) || hit.getType()!=net.minecraft.world.phys.HitResult.Type.BLOCK)return;
+        if (!StyleClient.attackMode() || !(mc.hitResult instanceof BlockHitResult hit)) return;
+        // During a leap, consume an empty swing before vanilla's miss delay can swallow it.
+        if (hit.getType() != net.minecraft.world.phys.HitResult.Type.BLOCK
+                && (fightingarts.client.SkillHud.local() == null || fightingarts.client.SkillHud.local().skill() != 4)) return;
         StyleNetwork.requestAttack(false);
         callback.setReturnValue(false);
     }

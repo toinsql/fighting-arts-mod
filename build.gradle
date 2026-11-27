@@ -10,7 +10,16 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
 neoForge {
     version = project.neo_version
-    runs { client { client() }; server { server(); programArgument '--nogui' } }
+    runs {
+        client { client() }
+        client2 {
+            client()
+            gameDirectory = project.file('run-client2')
+            programArgument '--username'
+            programArgument 'Dev2'
+        }
+        server { server(); programArgument '--nogui' }
+    }
     mods { fightingarts { sourceSet(sourceSets.main) } }
 }
 

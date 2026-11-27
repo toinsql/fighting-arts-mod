@@ -5,9 +5,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.math.Axis;
 import fightingarts.StyleState;
-import fightingarts.StyleMode;
 import fightingarts.StyleService;
+import fightingarts.client.mixin.CombatEatRendererInvoker;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
@@ -24,13 +25,16 @@ import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.client.event.RenderHandEvent;
+import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /** Renders detached, animated player arms and swords in first-person view. */
 public final class FirstPersonStyleRenderer {
     private static final float[] CAMERA_ORIGIN = {0, 28, 0};
+    private static final double SIGHT_HAND_TRAVEL = 1.65;
     private static final float CAMERA_ARM_DEPTH = -2.0f;
     private static final float CAMERA_SIDE_INSET = 1.25f;
     private static final Map<String, Group> GROUPS = new HashMap<>();
@@ -45,9 +49,16 @@ public final class FirstPersonStyleRenderer {
         return state != null && !state.phase().equals("OFF") && state.swords().size() >= 3;
     }
 
+    public static boolean usesStyleHands(float partialTick) {
+        return ownsHands() && !loweringVanillaHand(partialTick) && vanillaHandOffset(partialTick) <= 0;
+    }
+
     public static void render(RenderHandEvent event, CallbackInfoReturnable<Boolean> result) {
         Minecraft mc = Minecraft.getInstance();
         AbstractClientPlayer player = mc.player;
+        double sightHands=mc.level==null?0:BlindSight.handProgress(mc.level.getGameTime()+event.getPartialTick());
+        if (player != null && !BlindSight.active() && AnimationRenderer.firstPersonHasStrike(player)) sightHands = 0;
+        if(sightHands>=1){result.setReturnValue(true);return;}
         if (mc.level != null) {
             StyleState style = StyleClient.local();
             double now = mc.level.getGameTime() + (double) event.getPartialTick();
@@ -67,15 +78,31 @@ public final class FirstPersonStyleRenderer {
         AnimationRenderer.Pose firstPersonPose = AnimationRenderer.sampleFirstPersonPose(player, state, event.getPartialTick());
         if (firstPersonPose == null) AnimationRenderer.updateFirstPerson(player, event.getPartialTick());
         PlayerModel<?> model = renderer.getModel();
-        ItemStack transfer = state.phase().equals("SHEATHING") && state.mode() == StyleMode.COMMON
+        ItemStack transfer = state.phase().equals("SHEATHING") && state.mode().hasSkills()
                 ? state.swords().get(2) : state.phase().equals("UPGRADING") ? state.swords().get(0) : ItemStack.EMPTY;
         double spin = SwordModel.spinAge(player, event.getPartialTick());
         double upgradeTime = StyleService.upgradeAnimationSeconds(player.level().getGameTime() - state.phaseStart()
                 + (double) event.getPartialTick());
         ItemStack rightSword = state.swords().get(state.phase().equals("UPGRADING") && upgradeTime >= 1.29167
                 && upgradeTime < 1.66667 ? 2 : 0);
-        renderArmAndSword(player, model, HumanoidArm.LEFT, "left_item", "espada_left_item_AJUSTE",
-                spin >= 0 ? ItemStack.EMPTY : state.swords().get(1), transfer, event, firstPersonPose);
+        var hands=event.getPoseStack();
+        hands.pushPose();
+        if(sightHands>0){
+            // Lower both arms and swords as a group in camera space, regardless of the casting pose.
+            double progress=AttackHotbar.ease(sightHands);
+            hands.translate(0,-SIGHT_HAND_TRAVEL*progress*progress,0);
+        }
+        var consumption = state.phase().equals("ACTIVE") && !AnimationRenderer.firstPersonStriking(player, true)
+                ? ConsumableClient.frame(player, event.getPartialTick()) : null;
+        float switching = consumption == null ? 0 : consumption.draw();
+        if (switching < .75f) {
+            hands.pushPose();
+            hands.translate(0, -2 * switching, 0);
+            renderArmAndSword(player, model, HumanoidArm.LEFT, "left_item", "espada_left_item_AJUSTE",
+                    spin >= 0 ? ItemStack.EMPTY : state.swords().get(1), transfer, event, firstPersonPose);
+            hands.popPose();
+        }
+        if (switching > .4f) renderConsumable(mc, player, model, event, consumption);
         renderArmAndSword(player, model, HumanoidArm.RIGHT, "right_item", "espada_right_item_AJUSTE",
                 spin >= 0 ? ItemStack.EMPTY : rightSword, ItemStack.EMPTY, event, firstPersonPose);
         if (spin >= 0 && firstPersonPose != null) {
@@ -94,6 +121,38 @@ public final class FirstPersonStyleRenderer {
                     player, state.swords(), true, spin);
             pose.popPose();
         }
+        hands.popPose();
+    }
+
+    private static void renderConsumable(Minecraft mc, AbstractClientPlayer player, PlayerModel<?> model,
+                                         RenderHandEvent event, ConsumableClient.Frame use) {
+        PoseStack pose = event.getPoseStack();
+        var items = mc.gameRenderer.itemInHandRenderer;
+        var vanilla = (CombatEatRendererInvoker) items;
+        var buffers = event.getMultiBufferSource();
+        int light = event.getPackedLight();
+        var itemPose = new PoseStack();
+        itemPose.translate(0, -1.6 * (1 - use.draw()), 0);
+        vanilla.fightingarts$eatTransform(itemPose, event.getPartialTick(), HumanoidArm.LEFT, use.stack(), player);
+        vanilla.fightingarts$itemArmTransform(itemPose, HumanoidArm.LEFT, 0);
+        var itemTransform = itemPose.last().pose();
+        pose.pushPose();
+        pose.mulPose(itemTransform);
+        items.renderItem(player, use.stack(), ItemDisplayContext.FIRST_PERSON_LEFT_HAND, true, pose, buffers, light);
+        pose.popPose();
+
+        // The detached arm pivots at the shoulder. Put its wrist at the animated item grip.
+        var grip = itemTransform.transformPosition(new Vector3f(-.18f, -.06f, .18f));
+        float wristX = (1 - SwordModel.slimHandOffset(player, true)) / 16f;
+        pose.pushPose();
+        pose.translate(grip.x - .14f, grip.y + .12f, grip.z + .08f);
+        pose.mulPose(Axis.XP.rotationDegrees(-20));
+        pose.mulPose(Axis.ZP.rotationDegrees(-32));
+        pose.translate(-wristX, -8.5f / 16, 0);
+        var skin = buffers.getBuffer(RenderType.entityCutoutNoCull(player.getSkin().texture()));
+        renderDetached(model.leftArm, pose, skin, light);
+        renderDetached(model.leftSleeve, pose, skin, light);
+        pose.popPose();
     }
 
     private static double projectedIdleBladeLength(AbstractClientPlayer player) {
@@ -179,6 +238,7 @@ public final class FirstPersonStyleRenderer {
             renderDetached(sleeve, pose, vertex, light);
         }
 
+        AwakeningEffects.hand(pose, event.getMultiBufferSource(), player, event.getPartialTick(), firstPersonPose != null, !right);
         if (firstPersonPose != null) {
             renderSwordInCameraSpace(pose, event.getMultiBufferSource(), light, player, sword,
                     armBone, itemBone, adjustment, itemAnimation);

@@ -1,6 +1,7 @@
 .gradle/
 build/
 run/
+run-client2/
 logs/
 .agents/
 CONTEXTO-PARA-OUTRA-IA.md

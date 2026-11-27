@@ -7,6 +7,7 @@ import net.minecraft.world.phys.Vec3;
 
 /** Three simultaneous blade sweeps, with curved wakes that keep drifting as they dissolve. */
 final class ScreenSlashes {
+    private static final int MINT = 0x98efc4;
     private ScreenSlashes() {}
 
     static SkillMesh.Knot[] path(double width, double height, double age, int blade) {
@@ -44,13 +45,13 @@ final class ScreenSlashes {
             pose.translate(graphics.guiWidth() * .5, graphics.guiHeight() * (.47 + blade * .025), 200);
             pose.mulPose(Axis.ZP.rotationDegrees(angle));
             SkillMesh.Knot[] wake = path(graphics.guiWidth(), graphics.guiHeight(), age, blade);
-            draw(pose, SkillMesh.WIND, wake, 0xc6a1ff);
+            draw(pose, SkillMesh.SLASH_WAKE, wake, MINT);
             SkillMesh.Knot[] edge = new SkillMesh.Knot[wake.length];
             for (int i = 0; i < edge.length; i++) {
                 var knot = wake[i];
                 edge[i] = new SkillMesh.Knot(knot.center(), knot.side().scale(.20), knot.u(), knot.alpha());
             }
-            draw(pose, SkillMesh.VIOLET, edge, 0xffffff);
+            draw(pose, SkillMesh.SLASH_EDGE, edge, MINT);
             pose.popPose();
         }
         RenderSystem.enableCull();

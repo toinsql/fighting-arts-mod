@@ -36,6 +36,13 @@ final class SwordModel {
         pose.scale(ITEM_SCALE, ITEM_SCALE, ITEM_SCALE);
         Minecraft.getInstance().getItemRenderer().renderStatic(player, item, ItemDisplayContext.NONE,
                 false, pose, buffers, player.level(), light, OverlayTexture.NO_OVERLAY, player.getId());
+        var style = AnimationRenderer.STATES.get(player.getUUID());
+        var skill = SkillHud.STATUS.get(player.getUUID());
+        if (style != null && style.mode() == fightingarts.StyleMode.AWAKENED && !style.swords().isEmpty()
+                && item == style.swords().get(0) && skill != null && skill.skill() == 1) {
+            double elapsed = player.level().getGameTime() + Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false) - skill.start();
+            if (elapsed >= 0 && elapsed < skill.preparationTicks()) SkillEffects.chargeBlade(pose,buffers,elapsed/20);
+        }
         pose.popPose();
     }
 
@@ -91,7 +98,12 @@ final class SwordModel {
                 knots[i] = new SkillMesh.Knot(outward.scale(radius + .035 * Math.sin(t * 16)),
                         outward.scale(width * taper), t, opacity * brightness);
             }
-            SkillMesh.ribbon(pose, buffers, SkillMesh.WIND, knots, left ? 0xd593ff : 0x80ffc3);
+            int tint = switch (arc) {
+                case 0 -> left ? 0x8fe3b9 : 0x60e1a3;
+                case 1 -> left ? 0xd5f099 : 0xc1eddb;
+                default -> 0xe1eae4;
+            };
+            SkillMesh.ribbon(pose, buffers, SkillMesh.SLASH_WAKE, knots, tint);
         }
         int sparks = firstPerson ? 7 : 4;
         for (int i = 0; i < sparks; i++) {
@@ -100,9 +112,14 @@ final class SwordModel {
             Vec3 outward = new Vec3(Math.cos(sweep), Math.sin(sweep), 0);
             double size = (.034 + (i % 4) * .01) * (1 - phase) * (firstPerson ? 1.45 : 1);
             double radius = firstPerson && i >= 4 ? GRIP_TO_TIP * .63 : GRIP_TO_TIP - .05;
-            SkillMesh.sprite(pose, buffers, left ? SkillEffects.PURPLE_SPARK : SkillEffects.GREEN_SPARK,
+            int tint = switch (i % 3) {
+                case 0 -> 0xe6f1e9;
+                case 1 -> 0xdef6a1;
+                default -> 0x81e4c3;
+            };
+            SkillMesh.sprite(pose, buffers, SkillMesh.SPIN_SPARK,
                     outward.scale(radius + phase * .32), new Vec3(size, 0, 0), new Vec3(0, size, 0),
-                    opacity * (float) (1 - phase), 0xffffff);
+                    opacity * (float) (1 - phase), tint);
         }
     }
 }

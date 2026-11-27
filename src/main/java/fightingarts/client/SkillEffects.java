@@ -4,8 +4,11 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.math.Axis;
 import fightingarts.SantoryuSkills;
+import fightingarts.MoonSlashSurface;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Random;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -22,9 +25,13 @@ import org.joml.Vector3f;
 
 final class SkillEffects {
     private static final List<Timed> EFFECTS = new ArrayList<>();
+    private static final Map<Integer, WaveFrame> WAVES = new HashMap<>();
     private static final Minecraft MC = Minecraft.getInstance();
     static final ResourceLocation GREEN_SPARK = resource("spark_emerald");
-    static final ResourceLocation PURPLE_SPARK = resource("spark_violet");
+    static final ResourceLocation LIME_SPARK = resource("spark_lime");
+
+    private static final ResourceLocation WAVE = resource("awakened_wave"), FILAMENT = resource("awakened_filament"),
+            WIND = resource("awakened_wind"), CLOUD = resource("awakened_cloud");
 
     private SkillEffects() {}
 
@@ -32,10 +39,18 @@ final class SkillEffects {
         return ResourceLocation.fromNamespaceAndPath("fightingarts", "textures/effect/" + name + ".png");
     }
 
-    static void clear() { EFFECTS.clear();MoonMarkLayer.clear();SkillImpact.clear(); }
+    static void clear() { RiftDragon.clear();EFFECTS.clear();WAVES.clear();MoonMarkLayer.clear();SkillImpact.clear(); }
 
     static void add(SantoryuSkills.Effect effect) {
         if (MC.level == null) return;
+        if(effect.kind()==SantoryuSkills.DRAGON || effect.kind()==SantoryuSkills.DRAGON_IMPACT)RiftDragon.event(effect);
+        if (effect.kind() == SantoryuSkills.WAVE || effect.kind() == SantoryuSkills.WAVE_IMPACT) {
+            Vec3 direction = effect.to().subtract(effect.from()).normalize();
+            WaveFrame previous = WAVES.get(effect.target());
+            if (direction.lengthSqr() < .01 && previous != null) direction = previous.direction;
+            WAVES.put(effect.target(),new WaveFrame(effect,MC.level.getGameTime(),direction));
+            return;
+        }
         if (effect.kind() == 2 && effect.target() >= 0
                 && MC.level.getEntity(effect.target()) instanceof net.minecraft.world.entity.LivingEntity living) {
             SantoryuSkills.clientStun(living);MoonMarkLayer.add(living,effect.to());
@@ -61,6 +76,12 @@ final class SkillEffects {
             if (timed.effect.kind() == 3 && timed.effect.target() == MC.player.getId() && age >= 0 && age < 1.20) {
                 ScreenSlashes.render(graphics, age);
             }
+            if (timed.effect.kind() == SantoryuSkills.PARRY_EFFECT && timed.effect.target() == MC.player.getId()
+                    && age >= 0 && age < .24 && MC.options.getCameraType().isFirstPerson()) {
+                int size = (int) (graphics.guiHeight() * (.18 + age * .9));
+                AwakeningEffects.guiCell(graphics, 14, (graphics.guiWidth()-size)/2,
+                        (graphics.guiHeight()-size)/2, size, size, (float)(.75*Math.pow(1-age/.24, 2)));
+            }
             if (timed.effect.kind() != 6 || timed.effect.target() != MC.player.getId() || age >= .36) continue;
             var pose = graphics.pose();
             pose.pushPose();
@@ -69,8 +90,8 @@ final class SkillEffects {
             int width = (int) (graphics.guiWidth() * (.28 + .55 * Math.min(1, age * 14)));
             int height = Math.max(14, width / 6);
             RenderSystem.enableBlend();
-            graphics.setColor(1, .88f, 1, (float) Math.pow(1 - age / .36, 1.2));
-            graphics.blit(SkillMesh.WIND, -width / 2, -height / 2, width, height, 0, 0, 128, 32, 128, 32);
+            graphics.setColor(1, 1, 1, (float) Math.pow(1 - age / .36, 1.2));
+            graphics.blit(SkillMesh.FISSURE, -width / 2, -height / 2, width, height, 0, 0, 192, 48, 192, 48);
             graphics.setColor(1, 1, 1, 1);
             pose.popPose();
         }
@@ -86,10 +107,17 @@ final class SkillEffects {
         pose.pushPose();
         pose.translate(-eye.x, -eye.y, -eye.z);
         var buffers = MC.renderBuffers().bufferSource();
+        WAVES.values().removeIf(frame -> now-frame.tick >= 4);
+        WAVES.values().forEach(frame -> renderWave(pose,buffers,camera,frame,now-frame.tick));
+        RiftDragon.render(pose,buffers,camera,now);
         for (Timed timed : EFFECTS) {
             double age = (now - timed.start) / 20;
             var effect = timed.effect;
             switch (effect.kind()) {
+                case SantoryuSkills.WIND, SantoryuSkills.CLOUD, SantoryuSkills.BOLT ->
+                        awakenedEffect(pose,buffers,camera,timed,age,event.getPartialTick().getGameTimeDeltaPartialTick(false));
+                case SantoryuSkills.RUSH,SantoryuSkills.DRAGON,SantoryuSkills.DRAGON_IMPACT,SantoryuSkills.DRAGON_HIT ->
+                        RiftDragon.particles(pose,buffers,camera,effect,age,timed.seed);
                 case 1, 3 -> {
                     boolean large = effect.kind() == 3;
                     double life = large ? 1.5 : 1;
@@ -103,13 +131,134 @@ final class SkillEffects {
                 case 4, 7, 8 -> {
                     if (age < 1) smoke(pose, buffers, camera, timed, age);
                 }
+                case SantoryuSkills.PARRY_EFFECT -> {
+                    if (age >= 0 && age < .38) parryBurst(pose, buffers, camera, timed, age);
+                }
             }
         }
         if (SkillHud.aiming() && MC.player != null) aim(pose, buffers, camera, event.getPartialTick().getGameTimeDeltaPartialTick(false));
         pose.popPose();
-        for (ResourceLocation texture : new ResourceLocation[]{SkillMesh.EMERALD, SkillMesh.VIOLET, SkillMesh.FISSURE,
-                SkillMesh.AIM, SkillMesh.WIND, GREEN_SPARK, PURPLE_SPARK, SkillHud.ATLAS}) {
+        RiftDragon.flush(buffers);
+        for (ResourceLocation texture : new ResourceLocation[]{SkillMesh.EMERALD, SkillMesh.LIME, SkillMesh.FISSURE,
+                SkillMesh.AIM, SkillMesh.WIND, SkillMesh.SLASH_WAKE, SkillMesh.SPIN_SPARK,
+                GREEN_SPARK, LIME_SPARK, WAVE, FILAMENT, WIND, CLOUD, SkillHud.ATLAS}) {
             buffers.endBatch(SkillMesh.layer(texture));
+        }
+    }
+
+    static void chargeBlade(PoseStack pose, MultiBufferSource buffers, double age) {
+        for (int i = 0; i < 6; i++) {
+            double t = (age*3+i/6.0)%1, angle = i*2.4+age*2;
+            double along = .06+i*.08;
+            Vec3 anchor = new Vec3(along,along,.025);
+            Vec3 radial = new Vec3(Math.cos(angle),Math.sin(angle),Math.sin(angle*2)*.45);
+            Vec3 center = anchor.add(radial.scale((1-t)*.95));
+            Vec3 half = radial.scale(.24*(1-.4*t));
+            Vec3 across = new Vec3(-radial.y,radial.x,.08).scale(.12);
+            SkillMesh.sprite(pose,buffers,FILAMENT,center,half.add(across),half.subtract(across),
+                    (float)Math.sin(Math.PI*t),0xffffff);
+        }
+    }
+
+    private static void renderWave(PoseStack pose, MultiBufferSource buffers, Camera camera, WaveFrame frame, double elapsed) {
+        if (elapsed < 0 || frame.direction.lengthSqr() < .01) return;
+        Vec3 center = frame.effect.from().lerp(frame.effect.to(),Math.min(1,elapsed));
+        Vec3 direction = frame.direction;
+        Vec3 side = new Vec3(direction.z,0,-direction.x).normalize();
+        if (side.lengthSqr() < .01) side = new Vec3(camera.rotation().transform(new Vector3f(1,0,0)));
+        Vec3 up = direction.cross(side).normalize();
+        float alpha = (float)(1-Math.clamp((elapsed-1)/3,0,1));
+        for (int blade = 0; blade < 3; blade++) {
+            // Opposing hand cuts cross below the flatter sweep of the mouth sword.
+            double angle = blade == 2 ? .04 : (blade == 0 ? 1 : -1) * .71;
+            Vec3 axis = side.scale(Math.cos(angle)).add(up.scale(Math.sin(angle)));
+            Vec3 normal = up.scale(Math.cos(angle)).subtract(side.scale(Math.sin(angle)));
+            Vec3 pivot = center.add(up.scale(blade == 2 ? .34 : -.12))
+                    .add(side.scale(blade == 0 ? -.23 : blade == 1 ? .23 : 0));
+            SkillMesh.Knot[] edge = new SkillMesh.Knot[17];
+            for (int i=0; i<edge.length; i++) {
+                float u = i/(float)(edge.length-1);
+                double x = u*2-1, bow = 1-x*x;
+                Vec3 point = pivot.add(axis.scale(x*1.4))
+                        .add(direction.scale(.44*bow-.22)).add(normal.scale(.07*bow));
+                edge[i] = new SkillMesh.Knot(point,normal.scale(.11+.05*bow),u,alpha);
+            }
+            SkillMesh.ribbon(pose,buffers,WAVE,edge,blade == 0 ? 0xa0ffcc : blade == 1 ? 0xa9e78b : 0xffffff);
+        }
+
+    }
+
+    private record WaveFrame(SantoryuSkills.Effect effect, long tick, Vec3 direction) {}
+
+    private static void awakenedEffect(PoseStack pose, MultiBufferSource buffers, Camera camera, Timed timed, double age, float partial) {
+        var effect = timed.effect;
+        var actor = MC.level.getEntity(effect.target());
+        Vec3 viewRight = new Vec3(camera.rotation().transform(new Vector3f(1,0,0)));
+        Vec3 viewUp = new Vec3(camera.rotation().transform(new Vector3f(0,1,0)));
+        if (age < 0) return;
+        switch (effect.kind()) {
+            case SantoryuSkills.WIND -> {
+                if (age >= 1.5 || actor == null) return;
+                Vec3 front = Vec3.directionFromRotation(0,actor.getYRot());
+                Vec3 side = new Vec3(front.z,0,-front.x);
+                for (int i=0;i<6;i++) {
+                    double t = (age*1.4+i*.37)%1;
+                    Vec3 center = actor.getPosition(partial).add(front.scale(1.6+i*1.45))
+                            .add(side.scale((i%2==0?1:-1)*3.3*(1-t))).add(0,.8+.35*Math.sin(t*Math.PI),0);
+                    SkillMesh.sprite(pose,buffers,WIND,center,viewRight.scale(.95),viewUp.scale(.38),
+                            (float)(.65*Math.sin(t*Math.PI)),0xffffff);
+                }
+            }
+            case SantoryuSkills.CLOUD -> {
+                if (age >= 1.65 || actor == null || !actor.isAlive()) return;
+                Vec3 center = actor.getPosition(partial).add(0,actor.getBbHeight()+3,0);
+                float alpha = (float)Math.min(1,Math.min(age*7,(1.65-age)*5));
+                SkillMesh.sprite(pose,buffers,CLOUD,center,viewRight.scale(1.24),viewUp.scale(.66),alpha,0xffffff);
+            }
+            case SantoryuSkills.BOLT -> {
+                if (age >= .22) return;
+                Vec3 mid = effect.from().lerp(effect.to(),.52).add(viewRight.scale(.12*Math.sin(age*105)));
+                bolt(pose,buffers,camera,effect.from(),mid,(float)(1-age/.22));
+                bolt(pose,buffers,camera,mid,effect.to(),(float)(1-age/.22));
+            }
+        }
+    }
+
+    // The painted filament runs corner to corner. Align that diagonal with the two world anchors.
+    private static void bolt(PoseStack pose, MultiBufferSource buffers, Camera camera, Vec3 a, Vec3 b, float alpha) {
+        Vec3 half = b.subtract(a).scale(.5);
+        Vec3 across = SkillMesh.facingSide(half,a.subtract(camera.getPosition())).scale(half.length()*.22);
+        SkillMesh.sprite(pose,buffers,FILAMENT,a.lerp(b,.5),half.add(across).scale(.5),
+                half.subtract(across).scale(.5),alpha,0xffffff);
+    }
+
+    private static void parryBurst(PoseStack pose, MultiBufferSource buffers, Camera camera, Timed timed, double age) {
+        Vec3 origin = timed.effect.from();
+        Vec3 normal = timed.effect.to();
+        Vec3 up = new Vec3(0, 1, 0);
+        Vec3 right = up.cross(normal);
+        // The local first-person camera already has a flash centered on the crosshair.
+        if (camera.getPosition().distanceToSqr(origin) < .56 && MC.options.getCameraType().isFirstPerson()) return;
+        double radius = .13 + .85 * (1 - Math.pow(1-age/.38, 3));
+        float opacity = (float) Math.pow(1-age/.38, 2);
+        for (int arc = 0; arc < 3; arc++) {
+            SkillMesh.Knot[] knots = new SkillMesh.Knot[18];
+            for (int i=0; i<knots.length; i++) {
+                float progress = i/(float)(knots.length-1);
+                double angle = arc*Math.TAU/3 + progress*1.58 + age;
+                Vec3 outward = up.scale(Math.sin(angle)).add(right.scale(Math.cos(angle)));
+                knots[i] = new SkillMesh.Knot(origin.add(outward.scale(radius)), outward.scale(.055), progress, opacity);
+            }
+            SkillMesh.ribbon(pose, buffers, SkillMesh.WIND, knots, arc == 1 ? 0xa5d77d : 0xd5ffbb);
+        }
+        Random random = new Random(timed.seed);
+        for (int i=0; i<18; i++) {
+            double angle = random.nextDouble()*Math.TAU;
+            Vec3 vector = right.scale(Math.cos(angle)).add(up.scale(Math.sin(angle)));
+            double speed = random.nextDouble(1.1, 4.3);
+            Vec3 spark = origin.add(vector.scale(.1+speed*age)).add(normal.scale(age*random.nextDouble(-.75,.75)))
+                    .add(0, -2*age*age, 0);
+            cameraSprite(pose, buffers, camera, i%2==0 ? GREEN_SPARK : LIME_SPARK, spark, .035+.045*opacity, opacity);
         }
     }
 
@@ -130,7 +279,7 @@ final class SkillEffects {
                 ring[i] = new SkillMesh.Knot(center.add(radial.scale(radius * wave * (1 + strand * .09))),
                         radial.scale(.13 * (1 - progress)), i / (float)(ring.length - 1), (float)(1 - progress));
             }
-            SkillMesh.ribbon(pose,buffers,SkillMesh.WIND,ring,strand==0?0x80ffc3:0xd593ff);
+            SkillMesh.ribbon(pose,buffers,SkillMesh.WIND,ring,strand==0?0x80ffc3:0x98dc68);
         }
     }
 
@@ -148,8 +297,8 @@ final class SkillEffects {
         double size = large ? 1 : .62;
         Random random = new Random(timed.seed);
         for (int strand = 0; strand < 2; strand++) {
-            var texture = strand == 0 ? SkillMesh.EMERALD : SkillMesh.VIOLET;
-            var spark = strand == 0 ? GREEN_SPARK : PURPLE_SPARK;
+            var texture = strand == 0 ? SkillMesh.EMERALD : SkillMesh.LIME;
+            var spark = strand == 0 ? GREEN_SPARK : LIME_SPARK;
             Vec3[] path = new Vec3[steps + 1];
             for (int i = 0; i <= steps; i++) {
                 double t = i / (double) steps;
@@ -226,7 +375,7 @@ final class SkillEffects {
                     new Vec3(0, height * .5, 0), (float) life);
             if (i % 3 == 0) {
                 Vec3 ember = base.add(right.scale(.19 * Math.sin(i + age * 4))).add(0, height + localAge * .42, 0);
-                cameraSprite(pose, buffers, camera, i % 2 == 0 ? GREEN_SPARK : PURPLE_SPARK, ember, .09, (float) life);
+                cameraSprite(pose, buffers, camera, i % 2 == 0 ? GREEN_SPARK : LIME_SPARK, ember, .09, (float) life);
             }
         }
     }
@@ -246,8 +395,10 @@ final class SkillEffects {
 
     private static void aim(PoseStack pose, MultiBufferSource buffers, Camera camera, float partial) {
         Vec3 start = MC.player.getPosition(partial);
+        var style = AnimationRenderer.STATES.get(MC.player.getUUID());
+        if (style == null) return;
         var plan = fightingarts.LeapTrajectory.aim(MC.player, start,
-                start.add(0,MC.player.getEyeHeight(),0),MC.player.getViewVector(partial));
+                start.add(0,MC.player.getEyeHeight(),0),MC.player.getViewVector(partial), style.mode());
         if(plan==null)return;
         Vec3[] path=plan.path().stream().map(point->point.add(0,.12,0)).toArray(Vec3[]::new);
         SkillMesh.Knot[] beam=new SkillMesh.Knot[path.length];
@@ -298,5 +449,5 @@ final class SkillEffects {
         }
     }
 
-    private record Timed(SantoryuSkills.Effect effect, long start, long seed, List<Vec3> fire, List<MoonSurface.Patch> patches) {}
+    private record Timed(SantoryuSkills.Effect effect, long start, long seed, List<Vec3> fire, List<MoonSlashSurface.Patch> patches) {}
 }

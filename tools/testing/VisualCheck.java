@@ -445,6 +445,7 @@ final class VisualCheck {
         } catch (ReflectiveOperationException e) { throw new IllegalStateException(e); }
         p.getPersistentData().putInt("fightingarts_energy",137);
         p.getPersistentData().putInt("fightingarts_awakening",52);
+        p.getPersistentData().remove("fightingarts_awakening_hits");
         p.getPersistentData().putLongArray("fightingarts_cooldowns",new long[4]);
 
         ready=true;
